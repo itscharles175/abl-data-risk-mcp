@@ -1,0 +1,18 @@
+{
+  "sources": [
+    {
+      "id": "portfolio",
+      "dialect": "postgres",
+      "connectionEnv": "ABL_PORTFOLIO_DATABASE_URL",
+      "allowedSchemas": ["analytics"],
+      "allowedTables": ["analytics.loan_tape"],
+      "statementTimeoutMs": 15000,
+      "maxResultRows": 500
+    }
+  ],
+  "analysis": {
+    "maxGroups": 200,
+    "maxVintagePoints": 5000,
+    "minimumCohortSize": 10
+  }
+}
