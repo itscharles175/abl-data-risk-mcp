@@ -8,7 +8,12 @@ import { ControlStore } from "../src/control/store.js";
 import { DefinitionStore } from "../src/control/definitions.js";
 import { MonitoringAlertStore } from "../src/control/alerts.js";
 import { evaluateMonitoring } from "../src/domain/monitoring.js";
-import { buildRemoteServer, type GovernedWorkflowApi } from "../src/remote-server.js";
+import {
+  DEFAULT_REMOTE_GOVERNED_JOB_OPERATIONS,
+  buildRemoteServer,
+  type GovernedWorkflowApi,
+  type RemotePortfolioSurveillanceStartInput
+} from "../src/remote-server.js";
 import { createVerifiedPrincipalContext } from "../src/security/identity.js";
 import { compileAuthorizationPolicy } from "../src/security/policy.js";
 import { createHmacKeyRing, issuePrincipalBoundHandle } from "../src/security/signed-plan.js";
@@ -82,6 +87,21 @@ const workflow: GovernedWorkflowApi = {
     value: { status: "cancelled" },
     obligations: [policy.defaultObligations]
   })
+};
+
+const remoteProtocolModes = [
+  ["legacy 2025", "legacy"],
+  ["modern 2026", { pin: "2026-07-28" }]
+] as const;
+
+const portfolioSurveillanceRequest = {
+  contractVersion: 1 as const,
+  operation: "portfolio_surveillance_v1" as const,
+  sources: [
+    { kind: "certification_manifest" as const, certificationManifestId: "certification-jan" },
+    { kind: "certification_manifest" as const, certificationManifestId: "certification-feb" }
+  ],
+  definitionVersionIds: ["methodology-v1", "metric-balance-v1"]
 };
 
 test("remote server catalog is tenant scoped and mapping proposals never self-activate", async () => {
@@ -621,6 +641,226 @@ test("the production result-byte floor preserves mutating job acknowledgements",
     control.close();
   }
 });
+
+for (const [label, mode] of remoteProtocolModes) {
+  test(`portfolio surveillance is absent by default for ${label} remote clients`, async () => {
+    const control = new ControlStore(":memory:");
+    const definitions = new DefinitionStore(":memory:");
+    const monitoringAlerts = new MonitoringAlertStore(":memory:");
+    let startCalls = 0;
+    const disabledWorkflow: GovernedWorkflowApi = {
+      ...workflow,
+      startAuthorized: async (_verifiedPrincipal, input) => {
+        startCalls += 1;
+        return {
+          value: {
+            jobHandle: "job-handle-value-for-disabled-test",
+            status: "queued",
+            operation: input.operation
+          },
+          obligations: [policy.defaultObligations]
+        };
+      }
+    };
+    const authInfo: AuthInfo = {
+      token: principal.credentialFingerprint,
+      clientId: "codex",
+      scopes: [...principal.scopes],
+      expiresAt: principal.expiresAtEpochSeconds,
+      extra: { verifiedPrincipal: principal }
+    };
+    const handler = createMcpHandler((context) =>
+      buildRemoteServer(
+        { control, definitions, monitoringAlerts, policy, workflow: disabledWorkflow },
+        context
+      )
+    );
+    const client = new Client(
+      { name: "remote-surveillance-disabled-test", version: "1" },
+      { versionNegotiation: { mode } }
+    );
+    const transport = new StreamableHTTPClientTransport(new URL("https://mcp.test/mcp"), {
+      fetch: (url, init) => handler.fetch(new Request(url, init), { authInfo })
+    });
+    await client.connect(transport);
+    try {
+      const capabilities = await client.callTool({ name: "abl_capabilities" });
+      const operations = (capabilities.structuredContent as { operations: string[] }).operations;
+      assert.deepEqual(operations, DEFAULT_REMOTE_GOVERNED_JOB_OPERATIONS);
+      const tools = await client.listTools();
+      assert.equal(tools.tools.filter((tool) => tool.name === "abl_start_job").length, 1);
+      assert.equal(
+        JSON.stringify(tools.tools.find((tool) => tool.name === "abl_start_job")?.inputSchema).includes(
+          "portfolio_surveillance_v1"
+        ),
+        false
+      );
+
+      const disabled = await client.callTool({
+        name: "abl_start_job",
+        arguments: {
+          operation: "portfolio_surveillance_v1",
+          operation_request: portfolioSurveillanceRequest,
+          idempotency_key: "disabled-surveillance-job",
+          purpose: "portfolio_review"
+        }
+      });
+      assert.equal(disabled.isError, true);
+      assert.equal(startCalls, 0);
+    } finally {
+      await client.close();
+      await handler.close();
+      monitoringAlerts.close();
+      definitions.close();
+      control.close();
+    }
+  });
+
+  test(`explicit portfolio surveillance composition delegates through one start tool for ${label}`, async () => {
+    const control = new ControlStore(":memory:");
+    const definitions = new DefinitionStore(":memory:");
+    const monitoringAlerts = new MonitoringAlertStore(":memory:");
+    const starts: RemotePortfolioSurveillanceStartInput[] = [];
+    const enabledWorkflow = {
+      startPortfolioSurveillanceAuthorized: async (
+        _verifiedPrincipal: typeof principal,
+        input: RemotePortfolioSurveillanceStartInput
+      ) => {
+        starts.push(structuredClone(input));
+        return {
+          value: {
+            jobHandle: "job-handle-value-for-surveillance-test",
+            status: "queued",
+            operation: input.operation
+          },
+          obligations: [policy.defaultObligations]
+        };
+      }
+    };
+    const authInfo: AuthInfo = {
+      token: principal.credentialFingerprint,
+      clientId: "codex",
+      scopes: [...principal.scopes],
+      expiresAt: principal.expiresAtEpochSeconds,
+      extra: { verifiedPrincipal: principal }
+    };
+    const handler = createMcpHandler((context) =>
+      buildRemoteServer(
+        {
+          control,
+          definitions,
+          monitoringAlerts,
+          policy,
+          workflow,
+          portfolioSurveillanceWorkflow: enabledWorkflow
+        },
+        context
+      )
+    );
+    const client = new Client(
+      { name: "remote-surveillance-enabled-test", version: "1" },
+      { versionNegotiation: { mode } }
+    );
+    const transport = new StreamableHTTPClientTransport(new URL("https://mcp.test/mcp"), {
+      fetch: (url, init) => handler.fetch(new Request(url, init), { authInfo })
+    });
+    await client.connect(transport);
+    try {
+      const capabilities = await client.callTool({ name: "abl_capabilities" });
+      const operations = (capabilities.structuredContent as { operations: string[] }).operations;
+      assert.deepEqual(operations, [
+        ...DEFAULT_REMOTE_GOVERNED_JOB_OPERATIONS,
+        "portfolio_surveillance_v1"
+      ]);
+      const tools = await client.listTools();
+      assert.equal(tools.tools.filter((tool) => tool.name === "abl_start_job").length, 1);
+      assert.equal(
+        JSON.stringify(tools.tools.find((tool) => tool.name === "abl_start_job")?.inputSchema).includes(
+          "operation_request"
+        ),
+        true
+      );
+
+      const started = await client.callTool({
+        name: "abl_start_job",
+        arguments: {
+          operation: "portfolio_surveillance_v1",
+          operation_request: portfolioSurveillanceRequest,
+          idempotency_key: "surveillance-job",
+          purpose: "portfolio_review"
+        }
+      });
+      assert.equal(started.isError, undefined, JSON.stringify(started));
+      assert.equal(
+        (started.structuredContent as { job: { operation: string } }).job.operation,
+        "portfolio_surveillance_v1"
+      );
+      assert.deepEqual(starts, [
+        {
+          operation: "portfolio_surveillance_v1",
+          operationRequest: portfolioSurveillanceRequest,
+          idempotencyKey: "surveillance-job",
+          purpose: "portfolio_review"
+        }
+      ]);
+
+      const smuggled = await client.callTool({
+        name: "abl_start_job",
+        arguments: {
+          operation: "portfolio_surveillance_v1",
+          operation_request: {
+            ...portfolioSurveillanceRequest,
+            sources: [
+              {
+                kind: "certification_manifest",
+                certificationManifestId: "certification-jan",
+                records: [{ loan_id: "must-never-cross-mcp" }]
+              },
+              {
+                kind: "certification_manifest",
+                certificationManifestId: "certification-feb"
+              }
+            ]
+          },
+          idempotency_key: "smuggled-surveillance-job",
+          purpose: "portfolio_review"
+        }
+      });
+      assert.equal(smuggled.isError, true);
+      assert.equal(starts.length, 1);
+
+      const uncatalogedBundle = await client.callTool({
+        name: "abl_start_job",
+        arguments: {
+          operation: "portfolio_surveillance_v1",
+          operation_request: {
+            ...portfolioSurveillanceRequest,
+            sources: [
+              {
+                kind: "longitudinal_bundle",
+                longitudinalBundleId: "uncataloged-history"
+              },
+              {
+                kind: "longitudinal_bundle",
+                longitudinalBundleId: "uncataloged-history-2"
+              }
+            ]
+          },
+          idempotency_key: "bundle-surveillance-job",
+          purpose: "portfolio_review"
+        }
+      });
+      assert.equal(uncatalogedBundle.isError, true);
+      assert.equal(starts.length, 1);
+    } finally {
+      await client.close();
+      await handler.close();
+      monitoringAlerts.close();
+      definitions.close();
+      control.close();
+    }
+  });
+}
 
 test("remote server fails closed when the verified runtime brand is absent", () => {
   const control = new ControlStore(":memory:");

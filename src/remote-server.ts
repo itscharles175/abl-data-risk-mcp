@@ -39,21 +39,38 @@ import {
   registerGovernedAnalystTools,
   type GovernedAnalystWorkflowApi
 } from "./mcp/analyst-tools.js";
+import type {
+  GovernedWorkflowOperation,
+  StartGovernedJobInput
+} from "./services/governed-workflow.js";
 
-export type GovernedJobOperation =
-  | "snapshot_stratification"
-  | "snapshot_vintage"
-  | "ar_borrowing_base"
-  | "monitoring";
+export type RemoteGovernedJobOperation =
+  | GovernedWorkflowOperation
+  | "portfolio_surveillance_v1";
 
-export interface GovernedWorkflowStartInput {
-  readonly operation: GovernedJobOperation;
-  readonly certificationManifestId: string;
-  readonly definitionIds: readonly string[];
-  readonly inputArtifactId?: string;
-  readonly idempotencyKey: string;
-  readonly purpose?: string;
+/** Backward-compatible remote type name retained for callers and tests. */
+export type GovernedJobOperation = RemoteGovernedJobOperation;
+
+export interface RemotePortfolioSurveillanceOperationRequestV1 {
+  readonly contractVersion: 1;
+  readonly operation: "portfolio_surveillance_v1";
+  readonly sources: readonly Readonly<{
+    kind: "certification_manifest";
+    certificationManifestId: string;
+  }>[];
+  readonly definitionVersionIds: readonly string[];
 }
+
+export interface RemotePortfolioSurveillanceStartInput {
+  readonly operation: "portfolio_surveillance_v1";
+  readonly operationRequest: RemotePortfolioSurveillanceOperationRequestV1;
+  readonly idempotencyKey: string;
+  readonly purpose: string;
+}
+
+export type GovernedWorkflowStartInput =
+  | StartGovernedJobInput
+  | RemotePortfolioSurveillanceStartInput;
 
 export interface GovernedWorkflowTransportResponse {
   readonly value: unknown;
@@ -67,7 +84,7 @@ export interface GovernedWorkflowMutationRequestContext {
 export interface GovernedWorkflowApi {
   startAuthorized(
     principal: VerifiedPrincipalContext,
-    input: GovernedWorkflowStartInput,
+    input: StartGovernedJobInput,
     requestContext?: GovernedWorkflowMutationRequestContext
   ): GovernedWorkflowTransportResponse | Promise<GovernedWorkflowTransportResponse>;
   getJobStatusAuthorized(
@@ -85,21 +102,51 @@ export interface GovernedWorkflowApi {
   ): GovernedWorkflowTransportResponse | Promise<GovernedWorkflowTransportResponse>;
 }
 
+export interface PortfolioSurveillanceWorkflowApi {
+  startPortfolioSurveillanceAuthorized(
+    principal: VerifiedPrincipalContext,
+    input: RemotePortfolioSurveillanceStartInput,
+    requestContext?: GovernedWorkflowMutationRequestContext
+  ): GovernedWorkflowTransportResponse | Promise<GovernedWorkflowTransportResponse>;
+}
+
 export interface RemoteServerServices {
   readonly control: ControlStore;
   readonly definitions: DefinitionStore;
   readonly monitoringAlerts: MonitoringAlertStore;
   readonly policy: CompiledAuthorizationPolicy;
   readonly workflow: GovernedWorkflowApi;
+  /**
+   * Capability by construction. Omit until the trusted publication authority,
+   * two-stage planner, and durable v4 workflow are fully composed.
+   */
+  readonly portfolioSurveillanceWorkflow?: PortfolioSurveillanceWorkflowApi;
   /** Additive Release 3 analyst workflows. Omit until a governed implementation is configured. */
   readonly analystWorkflow?: GovernedAnalystWorkflowApi;
 }
+
+export const DEFAULT_REMOTE_GOVERNED_JOB_OPERATIONS = Object.freeze([
+  "snapshot_stratification",
+  "snapshot_vintage",
+  "ar_borrowing_base",
+  "monitoring"
+] as const satisfies readonly GovernedJobOperation[]);
+
+const ALL_REMOTE_GOVERNED_JOB_OPERATIONS = Object.freeze([
+  ...DEFAULT_REMOTE_GOVERNED_JOB_OPERATIONS,
+  "portfolio_surveillance_v1"
+] as const satisfies readonly GovernedJobOperation[]);
 
 const identifierSchema = z
   .string()
   .min(1)
   .max(256)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/);
+const portableIdentifierSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const digestSchema = z.string().regex(/^(?:sha256:)?[a-f0-9]{64}$/);
 const profileSchema = z.enum(["base", "stratification", "vintage", "borrowing_base"]);
@@ -112,11 +159,70 @@ const definitionKindSchema = z.enum([
 ]);
 const alertStatusSchema = z.enum(["open", "acknowledged", "escalated", "resolved", "suppressed"]);
 const jobStatusSchema = z.enum(["queued", "running", "succeeded", "failed", "cancelled"]);
-const governedJobOperationSchema = z.enum([
+const legacyGovernedJobOperationSchema = z.enum([
   "snapshot_stratification",
   "snapshot_vintage",
   "ar_borrowing_base",
   "monitoring"
+]);
+const governedJobOperationSchema = z.enum(ALL_REMOTE_GOVERNED_JOB_OPERATIONS);
+// The internal operation contract also supports longitudinal bundles. The
+// remote surface deliberately stays narrower until a durable, governed bundle
+// publication catalog is composed into the production runtime.
+const portfolioSurveillanceSourceReferenceSchema = z
+  .object({
+    kind: z.literal("certification_manifest"),
+    certificationManifestId: portableIdentifierSchema
+  })
+  .strict();
+const portfolioSurveillanceOperationRequestSchema = z
+  .object({
+    contractVersion: z.literal(1),
+    operation: z.literal("portfolio_surveillance_v1"),
+    sources: z.array(portfolioSurveillanceSourceReferenceSchema).min(2).max(120),
+    definitionVersionIds: z.array(portableIdentifierSchema).min(2).max(256)
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const sourceKeys = value.sources.map(
+      (source) => `certification_manifest:${source.certificationManifestId}`
+    );
+    if (new Set(sourceKeys).size !== sourceKeys.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["sources"],
+        message: "source references must be unique"
+      });
+    }
+    if (new Set(value.definitionVersionIds).size !== value.definitionVersionIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["definitionVersionIds"],
+        message: "definition version ids must be unique"
+      });
+    }
+  });
+const legacyStartJobInputSchema = z
+  .object({
+    operation: legacyGovernedJobOperationSchema,
+    certification_manifest_id: identifierSchema,
+    definition_ids: z.array(identifierSchema).min(1).max(100),
+    input_artifact_id: hashSchema.optional(),
+    idempotency_key: identifierSchema,
+    purpose: identifierSchema.optional()
+  })
+  .strict();
+const portfolioSurveillanceStartJobInputSchema = z
+  .object({
+    operation: z.literal("portfolio_surveillance_v1"),
+    operation_request: portfolioSurveillanceOperationRequestSchema,
+    idempotency_key: identifierSchema,
+    purpose: identifierSchema
+  })
+  .strict();
+const allStartJobInputSchema = z.discriminatedUnion("operation", [
+  legacyStartJobInputSchema,
+  portfolioSurveillanceStartJobInputSchema
 ]);
 const mappingProposalReceiptSchema = z.object({
   mappingVersionId: hashSchema,
@@ -198,6 +304,14 @@ const ALERT_DISCLOSURE_FIELDS = ["metric_observations", "monitor_thresholds"] as
 
 export function buildRemoteServer(services: RemoteServerServices, context: McpRequestContext): McpServer {
   const principal = verifiedPrincipal(context);
+  const portfolioSurveillanceEnabled = services.portfolioSurveillanceWorkflow !== undefined;
+  const governedJobOperations = Object.freeze([
+    ...DEFAULT_REMOTE_GOVERNED_JOB_OPERATIONS,
+    ...(portfolioSurveillanceEnabled ? (["portfolio_surveillance_v1"] as const) : [])
+  ]);
+  const startJobInputSchema = portfolioSurveillanceEnabled
+    ? allStartJobInputSchema
+    : legacyStartJobInputSchema;
   const auditRequestId = randomUUID();
   const requestStartedAt = performance.now();
   const authorizeRequest = (
@@ -272,7 +386,7 @@ export function buildRemoteServer(services: RemoteServerServices, context: McpRe
           dictionaryVersion: DICTIONARY_VERSION,
           protocolEras: ["legacy-2025", "2026-07-28"],
           transports: ["streamable-http"],
-          operations: ["snapshot_stratification", "snapshot_vintage", "ar_borrowing_base", "monitoring"],
+          operations: governedJobOperations,
           safety: {
             immutableCertifiedSnapshots: true,
             arbitrarySql: false,
@@ -599,34 +713,30 @@ export function buildRemoteServer(services: RemoteServerServices, context: McpRe
     {
       title: "Start a governed analytical job",
       description:
-        "Queue snapshot stratification, vintage, AR borrowing-base, or monitoring against certified data and active definitions.",
-      inputSchema: z
-        .object({
-          operation: governedJobOperationSchema,
-          certification_manifest_id: identifierSchema,
-          definition_ids: z.array(identifierSchema).min(1).max(100),
-          input_artifact_id: hashSchema.optional(),
-          idempotency_key: identifierSchema,
-          purpose: identifierSchema.optional()
-        })
-        .strict(),
+        portfolioSurveillanceEnabled
+          ? "Queue governed snapshot, borrowing-base, monitoring, or aggregate portfolio-surveillance analysis."
+          : "Queue snapshot stratification, vintage, AR borrowing-base, or monitoring against certified data and active definitions.",
+      inputSchema: startJobInputSchema,
       outputSchema: z.object({ job: startedJobReceiptSchema }),
       annotations: internalWriteAnnotations
     },
-    async (input) =>
+    async (input: z.infer<typeof allStartJobInputSchema>) =>
       guarded(async () => {
-        const authorized = await services.workflow.startAuthorized(
-          principal,
-          {
-            operation: input.operation,
-            certificationManifestId: input.certification_manifest_id,
-            definitionIds: input.definition_ids,
-            ...(input.input_artifact_id ? { inputArtifactId: input.input_artifact_id } : {}),
-            idempotencyKey: input.idempotency_key,
-            ...(input.purpose ? { purpose: input.purpose } : {})
-          },
-          { requestStartedAtMonotonicMs: requestStartedAt }
-        );
+        const requestContext = { requestStartedAtMonotonicMs: requestStartedAt };
+        const authorized =
+          input.operation === "portfolio_surveillance_v1"
+            ? await requiredPortfolioSurveillanceWorkflow(
+                services
+              ).startPortfolioSurveillanceAuthorized(
+                principal,
+                portfolioSurveillanceStartInput(input),
+                requestContext
+              )
+            : await services.workflow.startAuthorized(
+                principal,
+                legacyGovernedWorkflowStartInput(input),
+                requestContext
+              );
         return committedToolResult(
           { job: startedJobReceiptSchema.parse(authorized.value) },
           requiredResponseLimits(authorized.obligations),
@@ -1132,6 +1242,41 @@ function sourceColumnsFromSchema(schema: JsonValue) {
     type: field.types.length === 1 ? field.types[0]! : "unknown",
     nullable: field.nullable
   }));
+}
+
+function legacyGovernedWorkflowStartInput(
+  input: z.infer<typeof legacyStartJobInputSchema>
+): StartGovernedJobInput {
+  return Object.freeze({
+    operation: input.operation,
+    certificationManifestId: input.certification_manifest_id,
+    definitionIds: input.definition_ids,
+    ...(input.input_artifact_id === undefined
+      ? {}
+      : { inputArtifactId: input.input_artifact_id }),
+    idempotencyKey: input.idempotency_key,
+    ...(input.purpose === undefined ? {} : { purpose: input.purpose })
+  });
+}
+
+function portfolioSurveillanceStartInput(
+  input: z.infer<typeof portfolioSurveillanceStartJobInputSchema>
+): RemotePortfolioSurveillanceStartInput {
+  return Object.freeze({
+    operation: input.operation,
+    operationRequest: input.operation_request,
+    idempotencyKey: input.idempotency_key,
+    purpose: input.purpose
+  });
+}
+
+function requiredPortfolioSurveillanceWorkflow(
+  services: RemoteServerServices
+): PortfolioSurveillanceWorkflowApi {
+  if (!services.portfolioSurveillanceWorkflow) {
+    throw new Error("Portfolio surveillance workflow is not configured");
+  }
+  return services.portfolioSurveillanceWorkflow;
 }
 
 function pageAfter<T>(

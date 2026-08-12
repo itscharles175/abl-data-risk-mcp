@@ -117,6 +117,38 @@ test("retry, cooperative cancellation and requester hiding are enforced", () => 
   store.close();
 });
 
+test("cancellation wins atomically over a worker completion", () => {
+  const { store } = fixture();
+  const job = store.submit({
+    tenantId: "tenant-a",
+    requestedBy: "principal-a",
+    idempotencyKey: "request-cancel-race",
+    toolName: "analysis.run",
+    request: {}
+  });
+  const claim = store.claimNext({ tenantId: "tenant-a", workerId: "worker-1", leaseSeconds: 30 });
+  assert.ok(claim);
+
+  const cancelling = store.requestCancellation("tenant-a", job.jobId, "principal-a");
+  assert.equal(cancelling.cancellationRequested, true);
+  assert.throws(
+    () => store.complete("tenant-a", job.jobId, "worker-1", claim.claimToken, "result-too-late"),
+    (error: unknown) => error instanceof JobStoreError && error.code === "CLAIM_REJECTED"
+  );
+
+  const cancelled = store.fail(
+    "tenant-a",
+    job.jobId,
+    "worker-1",
+    claim.claimToken,
+    "CANCELLED",
+    false
+  );
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.resultHandle, null);
+  store.close();
+});
+
 test("worker discovery returns only bounded claimable tenant partitions", () => {
   const { store, advance } = fixture();
   store.submit({

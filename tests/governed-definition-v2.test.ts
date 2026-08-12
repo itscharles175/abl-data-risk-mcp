@@ -1003,15 +1003,118 @@ test("the shipped schema-v1 event history migrates atomically before withdrawal 
   database.close();
 });
 
+test("the exact shipped schema-v2 kind constraint migrates to v3 without rewriting evidence", () => {
+  const directory = mkdtempSync(join(tmpdir(), "abl-governed-definition-v3-migration-"));
+  directories.push(directory);
+  const databasePath = join(directory, "control.sqlite");
+  let clockIndex = 0;
+  const clock = () => new Date(TIMES[clockIndex++] ?? "2026-08-12T13:00:00.000Z");
+  const initial = new GovernedDefinitionV2Store(databasePath, { clock });
+  const request = proposal("metric-migrate-v2", "1.0.0", "2026-01-01", 12);
+  const proposed = initial.propose(request);
+  const validated = transition(initial, proposed, "validated", "checker-a", "migrate-v2-validate");
+  const approved = transition(initial, validated, "approved", "checker-a", "migrate-v2-approve");
+  const beforeEvents = initial.listAuditEvents("tenant-a");
+  const beforeVersionHash = approved.version.versionHash;
+  initial.close();
+
+  downgradeGovernedDefinitionVersionsToShippedV2(databasePath);
+  const sequenceDatabase = new DatabaseSync(databasePath);
+  const sequenceUpdate = sequenceDatabase
+    .prepare("UPDATE sqlite_sequence SET seq = 70 WHERE name = 'governed_definition_v2_events'")
+    .run();
+  assert.equal(sequenceUpdate.changes, 1);
+  sequenceDatabase.close();
+
+  const migrated = new GovernedDefinitionV2Store(databasePath, { clock });
+  assert.deepEqual(migrated.listAuditEvents("tenant-a"), beforeEvents);
+  assert.equal(migrated.get("tenant-a", approved.version.definitionVersionId)?.version.versionHash, beforeVersionHash);
+  assert.equal(migrated.propose(request).version.versionHash, beforeVersionHash);
+  const withdrawn = migrated.transition({
+    tenantId: "tenant-a",
+    definitionVersionId: approved.version.definitionVersionId,
+    toStatus: "withdrawn",
+    expectedRevision: approved.lifecycleRevision,
+    actor: "checker-b",
+    evidence: { reason: "v2 migration high-water check" },
+    idempotencyKey: "migrate-v2-withdraw"
+  });
+  assert.equal(withdrawn.status, "withdrawn");
+  assert.equal(migrated.listAuditEvents("tenant-a").at(-1)?.sequence, 71);
+  migrated.close();
+
+  const database = new DatabaseSync(databasePath);
+  assert.equal(
+    (database.prepare("SELECT schema_version FROM component_schema_versions WHERE component_name = ?").get(GOVERNED_DEFINITION_V2_STORE_COMPONENT) as { schema_version: number }).schema_version,
+    GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION
+  );
+  const versionsSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'governed_definition_v2_versions'").get() as { sql: string }).sql;
+  assert.match(versionsSql, /'source_access_policy'/);
+  assert.equal(
+    (database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'governed_definition_v2_events'").get() as { seq: number }).seq,
+    71
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
 function downgradeGovernedDefinitionEventsToShippedV1(databasePath: string): void {
   const database = new DatabaseSync(databasePath);
   database.exec(`
     PRAGMA foreign_keys = ON;
     BEGIN IMMEDIATE;
+    DROP TRIGGER governed_definition_v2_idempotency_no_update;
+    DROP TRIGGER governed_definition_v2_idempotency_no_delete;
+    ALTER TABLE governed_definition_v2_idempotency RENAME TO governed_definition_v2_idempotency_v3;
     DROP TRIGGER governed_definition_v2_events_no_update;
     DROP TRIGGER governed_definition_v2_events_no_delete;
     DROP INDEX governed_definition_v2_events_tenant_sequence;
     ALTER TABLE governed_definition_v2_events RENAME TO governed_definition_v2_events_v2;
+    DROP TRIGGER governed_definition_v2_versions_no_update;
+    DROP TRIGGER governed_definition_v2_versions_no_delete;
+    DROP INDEX governed_definition_v2_key;
+    ALTER TABLE governed_definition_v2_versions RENAME TO governed_definition_v2_versions_v3;
+    CREATE TABLE governed_definition_v2_versions (
+      tenant_id TEXT NOT NULL,
+      definition_version_id TEXT NOT NULL,
+      definition_key TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN (
+        'source_contract','mapping_spec','methodology_bundle','borrowing_base_policy_v2',
+        'metric_definition','metric_projection','cohort_definition','bin_definition',
+        'reconciliation_definition','entity_resolution_definition','report_definition',
+        'scenario_definition','covenant_definition'
+      )),
+      semantic_version TEXT NOT NULL,
+      effective_from TEXT NOT NULL,
+      effective_to TEXT,
+      predecessor_definition_version_id TEXT,
+      rollback_target_definition_version_id TEXT,
+      document_json TEXT NOT NULL,
+      document_hash TEXT NOT NULL CHECK (document_hash GLOB 'sha256:[0-9a-f]*' AND length(document_hash) = 71),
+      semantic_diff_json TEXT NOT NULL,
+      semantic_diff_hash TEXT NOT NULL CHECK (semantic_diff_hash GLOB 'sha256:[0-9a-f]*' AND length(semantic_diff_hash) = 71),
+      impact_preview_json TEXT NOT NULL,
+      impact_preview_hash TEXT NOT NULL CHECK (impact_preview_hash GLOB 'sha256:[0-9a-f]*' AND length(impact_preview_hash) = 71),
+      proposed_by TEXT NOT NULL,
+      proposed_at TEXT NOT NULL,
+      version_hash TEXT NOT NULL CHECK (version_hash GLOB 'sha256:[0-9a-f]*' AND length(version_hash) = 71),
+      PRIMARY KEY (tenant_id, definition_version_id),
+      UNIQUE (tenant_id, kind, definition_key, semantic_version),
+      FOREIGN KEY (tenant_id, predecessor_definition_version_id)
+        REFERENCES governed_definition_v2_versions (tenant_id, definition_version_id),
+      FOREIGN KEY (tenant_id, rollback_target_definition_version_id)
+        REFERENCES governed_definition_v2_versions (tenant_id, definition_version_id)
+    ) STRICT;
+    INSERT INTO governed_definition_v2_versions
+    SELECT * FROM governed_definition_v2_versions_v3;
+    CREATE INDEX governed_definition_v2_key
+      ON governed_definition_v2_versions (tenant_id, kind, definition_key, effective_from);
+    CREATE TRIGGER governed_definition_v2_versions_no_update
+    BEFORE UPDATE ON governed_definition_v2_versions
+    BEGIN SELECT RAISE(ABORT, 'governed definition v2 versions are immutable'); END;
+    CREATE TRIGGER governed_definition_v2_versions_no_delete
+    BEFORE DELETE ON governed_definition_v2_versions
+    BEGIN SELECT RAISE(ABORT, 'governed definition v2 versions are immutable'); END;
     CREATE TABLE governed_definition_v2_events (
       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
       tenant_id TEXT NOT NULL,
@@ -1055,11 +1158,113 @@ function downgradeGovernedDefinitionEventsToShippedV1(databasePath: string): voi
     CREATE TRIGGER governed_definition_v2_events_no_delete
     BEFORE DELETE ON governed_definition_v2_events
     BEGIN SELECT RAISE(ABORT, 'governed definition v2 events are append-only'); END;
+    CREATE TABLE governed_definition_v2_idempotency (
+      tenant_id TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      request_hash TEXT NOT NULL CHECK (request_hash GLOB 'sha256:[0-9a-f]*' AND length(request_hash) = 71),
+      definition_version_id TEXT NOT NULL,
+      response_revision INTEGER NOT NULL CHECK (response_revision > 0),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (tenant_id, operation, actor, idempotency_key),
+      FOREIGN KEY (tenant_id, definition_version_id)
+        REFERENCES governed_definition_v2_versions (tenant_id, definition_version_id)
+    ) STRICT;
+    INSERT INTO governed_definition_v2_idempotency
+    SELECT * FROM governed_definition_v2_idempotency_v3;
+    CREATE TRIGGER governed_definition_v2_idempotency_no_update
+    BEFORE UPDATE ON governed_definition_v2_idempotency
+    BEGIN SELECT RAISE(ABORT, 'governed definition v2 idempotency is immutable'); END;
+    CREATE TRIGGER governed_definition_v2_idempotency_no_delete
+    BEFORE DELETE ON governed_definition_v2_idempotency
+    BEGIN SELECT RAISE(ABORT, 'governed definition v2 idempotency is immutable'); END;
+    DROP TABLE governed_definition_v2_idempotency_v3;
+    DROP TABLE governed_definition_v2_versions_v3;
     UPDATE component_schema_versions
        SET schema_version = 1
      WHERE component_name = '${GOVERNED_DEFINITION_V2_STORE_COMPONENT}';
     COMMIT;
   `);
+  database.close();
+}
+
+function downgradeGovernedDefinitionVersionsToShippedV2(databasePath: string): void {
+  const database = new DatabaseSync(databasePath);
+  const sql = (type: "table" | "index" | "trigger", name: string): string => {
+    const row = database
+      .prepare("SELECT sql FROM sqlite_master WHERE type = ? AND name = ?")
+      .get(type, name) as { readonly sql: string } | undefined;
+    assert.ok(row?.sql, `${type} ${name}`);
+    return row.sql;
+  };
+  const versionTableSql = sql("table", "governed_definition_v2_versions").replace(
+    ",'source_access_policy'",
+    ""
+  );
+  assert.equal(versionTableSql.includes("source_access_policy"), false);
+  const eventTableSql = sql("table", "governed_definition_v2_events");
+  const idempotencyTableSql = sql("table", "governed_definition_v2_idempotency");
+  const versionIndexSql = sql("index", "governed_definition_v2_key");
+  const eventIndexSql = sql("index", "governed_definition_v2_events_tenant_sequence");
+  const versionUpdateTriggerSql = sql("trigger", "governed_definition_v2_versions_no_update");
+  const versionDeleteTriggerSql = sql("trigger", "governed_definition_v2_versions_no_delete");
+  const eventUpdateTriggerSql = sql("trigger", "governed_definition_v2_events_no_update");
+  const eventDeleteTriggerSql = sql("trigger", "governed_definition_v2_events_no_delete");
+  const idempotencyUpdateTriggerSql = sql("trigger", "governed_definition_v2_idempotency_no_update");
+  const idempotencyDeleteTriggerSql = sql("trigger", "governed_definition_v2_idempotency_no_delete");
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER governed_definition_v2_idempotency_no_update;
+    DROP TRIGGER governed_definition_v2_idempotency_no_delete;
+    ALTER TABLE governed_definition_v2_idempotency RENAME TO governed_definition_v2_idempotency_v3;
+    DROP TRIGGER governed_definition_v2_events_no_update;
+    DROP TRIGGER governed_definition_v2_events_no_delete;
+    DROP INDEX governed_definition_v2_events_tenant_sequence;
+    ALTER TABLE governed_definition_v2_events RENAME TO governed_definition_v2_events_v3;
+    DROP TRIGGER governed_definition_v2_versions_no_update;
+    DROP TRIGGER governed_definition_v2_versions_no_delete;
+    DROP INDEX governed_definition_v2_key;
+    ALTER TABLE governed_definition_v2_versions RENAME TO governed_definition_v2_versions_v3;
+
+    ${versionTableSql};
+    INSERT INTO governed_definition_v2_versions SELECT * FROM governed_definition_v2_versions_v3;
+    ${versionIndexSql};
+    ${versionUpdateTriggerSql};
+    ${versionDeleteTriggerSql};
+
+    ${eventTableSql};
+    INSERT INTO governed_definition_v2_events SELECT * FROM governed_definition_v2_events_v3 ORDER BY sequence;
+    UPDATE sqlite_sequence
+       SET seq = MAX(
+         seq,
+         COALESCE(
+           (SELECT prior.seq FROM sqlite_sequence AS prior
+             WHERE prior.name = 'governed_definition_v2_events_v3'),
+           seq
+         )
+       )
+     WHERE name = 'governed_definition_v2_events';
+    ${eventIndexSql};
+    ${eventUpdateTriggerSql};
+    ${eventDeleteTriggerSql};
+
+    ${idempotencyTableSql};
+    INSERT INTO governed_definition_v2_idempotency SELECT * FROM governed_definition_v2_idempotency_v3;
+    ${idempotencyUpdateTriggerSql};
+    ${idempotencyDeleteTriggerSql};
+
+    DROP TABLE governed_definition_v2_idempotency_v3;
+    DROP TABLE governed_definition_v2_events_v3;
+    DROP TABLE governed_definition_v2_versions_v3;
+    UPDATE component_schema_versions
+       SET schema_version = 2
+     WHERE component_name = '${GOVERNED_DEFINITION_V2_STORE_COMPONENT}';
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 }
 

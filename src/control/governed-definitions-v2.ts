@@ -33,7 +33,7 @@ export type {
 } from "../contracts/index.js";
 
 export const GOVERNED_DEFINITION_V2_STORE_COMPONENT = "abl.governed-definition-v2-store" as const;
-export const GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION = 2 as const;
+export const GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION = 3 as const;
 
 export interface ProposeGovernedDefinitionV2Input {
   readonly tenantId: string;
@@ -140,7 +140,8 @@ export class GovernedDefinitionV2Store {
         supportedVersion: GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION,
         migrations: [
           { version: 1, sql: GOVERNED_DEFINITION_V2_SCHEMA_V1 },
-          { version: 2, sql: GOVERNED_DEFINITION_V2_MIGRATION_V2 }
+          { version: 2, sql: GOVERNED_DEFINITION_V2_MIGRATION_V2 },
+          { version: 3, sql: GOVERNED_DEFINITION_V2_MIGRATION_V3 }
         ],
         unsupportedVersionError: (current, supported) =>
           new GovernedDefinitionV2StoreError(
@@ -935,6 +936,139 @@ BEGIN SELECT RAISE(ABORT, 'governed definition v2 events are append-only'); END;
 CREATE TRIGGER governed_definition_v2_events_no_delete
 BEFORE DELETE ON governed_definition_v2_events
 BEGIN SELECT RAISE(ABORT, 'governed definition v2 events are append-only'); END;
+`;
+
+// Additive v3 widens the immutable definition-kind CHECK. SQLite cannot alter
+// that CHECK in place, so the version table and its two dependent immutable
+// tables are rebuilt in one attested transaction. Rows, hashes, lifecycle
+// evidence, and idempotency receipts remain byte-for-byte unchanged.
+const GOVERNED_DEFINITION_V2_MIGRATION_V3 = `
+DROP TRIGGER governed_definition_v2_idempotency_no_update;
+DROP TRIGGER governed_definition_v2_idempotency_no_delete;
+ALTER TABLE governed_definition_v2_idempotency RENAME TO governed_definition_v2_idempotency_v2;
+
+DROP TRIGGER governed_definition_v2_events_no_update;
+DROP TRIGGER governed_definition_v2_events_no_delete;
+DROP INDEX governed_definition_v2_events_tenant_sequence;
+ALTER TABLE governed_definition_v2_events RENAME TO governed_definition_v2_events_v2;
+
+DROP TRIGGER governed_definition_v2_versions_no_update;
+DROP TRIGGER governed_definition_v2_versions_no_delete;
+DROP INDEX governed_definition_v2_key;
+ALTER TABLE governed_definition_v2_versions RENAME TO governed_definition_v2_versions_v2;
+
+CREATE TABLE governed_definition_v2_versions (
+  tenant_id TEXT NOT NULL,
+  definition_version_id TEXT NOT NULL,
+  definition_key TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN (
+    'source_contract','source_access_policy','mapping_spec','methodology_bundle','borrowing_base_policy_v2',
+    'metric_definition','metric_projection','cohort_definition','bin_definition',
+    'reconciliation_definition','entity_resolution_definition','report_definition',
+    'scenario_definition','covenant_definition'
+  )),
+  semantic_version TEXT NOT NULL,
+  effective_from TEXT NOT NULL,
+  effective_to TEXT,
+  predecessor_definition_version_id TEXT,
+  rollback_target_definition_version_id TEXT,
+  document_json TEXT NOT NULL,
+  document_hash TEXT NOT NULL CHECK (document_hash GLOB 'sha256:[0-9a-f]*' AND length(document_hash) = 71),
+  semantic_diff_json TEXT NOT NULL,
+  semantic_diff_hash TEXT NOT NULL CHECK (semantic_diff_hash GLOB 'sha256:[0-9a-f]*' AND length(semantic_diff_hash) = 71),
+  impact_preview_json TEXT NOT NULL,
+  impact_preview_hash TEXT NOT NULL CHECK (impact_preview_hash GLOB 'sha256:[0-9a-f]*' AND length(impact_preview_hash) = 71),
+  proposed_by TEXT NOT NULL,
+  proposed_at TEXT NOT NULL,
+  version_hash TEXT NOT NULL CHECK (version_hash GLOB 'sha256:[0-9a-f]*' AND length(version_hash) = 71),
+  PRIMARY KEY (tenant_id, definition_version_id),
+  UNIQUE (tenant_id, kind, definition_key, semantic_version),
+  FOREIGN KEY (tenant_id, predecessor_definition_version_id)
+    REFERENCES governed_definition_v2_versions (tenant_id, definition_version_id),
+  FOREIGN KEY (tenant_id, rollback_target_definition_version_id)
+    REFERENCES governed_definition_v2_versions (tenant_id, definition_version_id)
+) STRICT;
+INSERT INTO governed_definition_v2_versions
+SELECT * FROM governed_definition_v2_versions_v2;
+CREATE INDEX governed_definition_v2_key
+  ON governed_definition_v2_versions (tenant_id, kind, definition_key, effective_from);
+CREATE TRIGGER governed_definition_v2_versions_no_update
+BEFORE UPDATE ON governed_definition_v2_versions
+BEGIN SELECT RAISE(ABORT, 'governed definition v2 versions are immutable'); END;
+CREATE TRIGGER governed_definition_v2_versions_no_delete
+BEFORE DELETE ON governed_definition_v2_versions
+BEGIN SELECT RAISE(ABORT, 'governed definition v2 versions are immutable'); END;
+
+CREATE TABLE governed_definition_v2_events (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id TEXT NOT NULL,
+  event_id TEXT NOT NULL UNIQUE,
+  definition_version_id TEXT NOT NULL,
+  lifecycle_revision INTEGER NOT NULL CHECK (lifecycle_revision > 0),
+  from_status TEXT CHECK (from_status IS NULL OR from_status IN (
+    'proposed','validated','approved','active','superseded','retired','withdrawn'
+  )),
+  to_status TEXT NOT NULL CHECK (to_status IN (
+    'proposed','validated','approved','active','superseded','retired','withdrawn'
+  )),
+  actor TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  previous_event_hash TEXT CHECK (
+    previous_event_hash IS NULL OR
+    (previous_event_hash GLOB 'sha256:[0-9a-f]*' AND length(previous_event_hash) = 71)
+  ),
+  event_hash TEXT NOT NULL CHECK (event_hash GLOB 'sha256:[0-9a-f]*' AND length(event_hash) = 71),
+  UNIQUE (tenant_id, definition_version_id, lifecycle_revision),
+  FOREIGN KEY (tenant_id, definition_version_id)
+    REFERENCES governed_definition_v2_versions (tenant_id, definition_version_id)
+) STRICT;
+INSERT INTO governed_definition_v2_events
+SELECT * FROM governed_definition_v2_events_v2 ORDER BY sequence;
+UPDATE sqlite_sequence
+   SET seq = MAX(
+     seq,
+     COALESCE(
+       (SELECT prior.seq FROM sqlite_sequence AS prior
+         WHERE prior.name = 'governed_definition_v2_events_v2'),
+       seq
+     )
+   )
+ WHERE name = 'governed_definition_v2_events';
+CREATE INDEX governed_definition_v2_events_tenant_sequence
+  ON governed_definition_v2_events (tenant_id, sequence);
+CREATE TRIGGER governed_definition_v2_events_no_update
+BEFORE UPDATE ON governed_definition_v2_events
+BEGIN SELECT RAISE(ABORT, 'governed definition v2 events are append-only'); END;
+CREATE TRIGGER governed_definition_v2_events_no_delete
+BEFORE DELETE ON governed_definition_v2_events
+BEGIN SELECT RAISE(ABORT, 'governed definition v2 events are append-only'); END;
+
+CREATE TABLE governed_definition_v2_idempotency (
+  tenant_id TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL CHECK (request_hash GLOB 'sha256:[0-9a-f]*' AND length(request_hash) = 71),
+  definition_version_id TEXT NOT NULL,
+  response_revision INTEGER NOT NULL CHECK (response_revision > 0),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, operation, actor, idempotency_key),
+  FOREIGN KEY (tenant_id, definition_version_id)
+    REFERENCES governed_definition_v2_versions (tenant_id, definition_version_id)
+) STRICT;
+INSERT INTO governed_definition_v2_idempotency
+SELECT * FROM governed_definition_v2_idempotency_v2;
+CREATE TRIGGER governed_definition_v2_idempotency_no_update
+BEFORE UPDATE ON governed_definition_v2_idempotency
+BEGIN SELECT RAISE(ABORT, 'governed definition v2 idempotency is immutable'); END;
+CREATE TRIGGER governed_definition_v2_idempotency_no_delete
+BEFORE DELETE ON governed_definition_v2_idempotency
+BEGIN SELECT RAISE(ABORT, 'governed definition v2 idempotency is immutable'); END;
+
+DROP TABLE governed_definition_v2_idempotency_v2;
+DROP TABLE governed_definition_v2_events_v2;
+DROP TABLE governed_definition_v2_versions_v2;
 `;
 
 interface GovernedDefinitionVersionRow {

@@ -319,7 +319,8 @@ export class JobStore {
     return this.#finishClaim(tenantId, jobId, workerId, claimToken, {
       status: "succeeded",
       resultHandle,
-      errorCode: null
+      errorCode: null,
+      requireCancellationClear: true
     });
   }
 
@@ -362,7 +363,8 @@ export class JobStore {
     return this.#finishClaim(tenantId, jobId, workerId, claimToken, {
       status: current.cancellationRequested ? "cancelled" : "failed",
       resultHandle: null,
-      errorCode
+      errorCode,
+      requireCancellationClear: false
     });
   }
 
@@ -539,7 +541,12 @@ export class JobStore {
     jobId: string,
     workerId: string,
     claimToken: string,
-    outcome: { readonly status: "succeeded" | "failed" | "cancelled"; readonly resultHandle: string | null; readonly errorCode: string | null }
+    outcome: {
+      readonly status: "succeeded" | "failed" | "cancelled";
+      readonly resultHandle: string | null;
+      readonly errorCode: string | null;
+      readonly requireCancellationClear: boolean;
+    }
   ): JobRecord {
     this.#assertClaim(tenantId, jobId, workerId, claimToken);
     const now = this.#now();
@@ -550,7 +557,8 @@ export class JobStore {
                 claimed_by = NULL, claim_token_hash = NULL,
                 lease_expires_at = NULL, updated_at = ?
           WHERE tenant_id = ? AND job_id = ? AND status = 'running'
-            AND claimed_by = ? AND claim_token_hash = ? AND lease_expires_at > ?`
+            AND claimed_by = ? AND claim_token_hash = ? AND lease_expires_at > ?
+            AND (? = 0 OR cancellation_requested = 0)`
       )
       .run(
         outcome.status,
@@ -561,7 +569,8 @@ export class JobStore {
         jobId,
         workerId,
         sha256(claimToken),
-        now
+        now,
+        outcome.requireCancellationClear ? 1 : 0
       );
     if (Number(updated.changes) !== 1) throw new JobStoreError("CLAIM_REJECTED", "The active job lease was not found");
     return this.get(tenantId, jobId);

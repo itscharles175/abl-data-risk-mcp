@@ -70,6 +70,8 @@ The authenticated remote process uses the following contract. Empty, malformed, 
 
 The governed remote runtime validates the non-secret source configuration for syntax but does not instantiate live source adapters or require a portfolio database credential. Database extraction and snapshot certification belong to a separately authorized connector/ingestion deployment with its own read-only credential, egress, and release evidence. Keep the remote base's source list empty unless that separate topology is being deliberately composed and reviewed.
 
+The checked-in `remote-cli` does not construct `portfolioSurveillanceWorkflow`; `abl_capabilities` and `abl_start_job` expose only snapshot stratification, vintage, AR borrowing-base, and monitoring. `buildRemoteServer` has a fail-closed optional seam for `portfolio_surveillance_v1`, but there is no safe environment toggle for it. Do not compose it until repository-backed certified-publication authority, deterministic source-access-policy selection/preflight, post-policy materialization, and durable v4 execution/recovery are present and reviewed.
+
 Tenant membership uses the fixed `oauth_tenant_memberships` control-store table. Its table name is not configurable by an operator, client, model, or token. Populate memberships through the reviewed administrative workflow before admitting traffic; never infer a tenant from an MCP tool argument.
 
 ## Compose

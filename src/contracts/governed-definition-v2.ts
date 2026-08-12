@@ -28,10 +28,12 @@ import {
 } from "./canonical.js";
 import { parseMappingSpecV2 } from "./mapping-v2.js";
 import { parseMetricProjectionV1 } from "./metric-projection-v1.js";
+import { parseSourceAccessPolicyV1 } from "./source-access-policy-v1.js";
 import { parseSourceContractV1 } from "./source-contract-v1.js";
 
 export const GovernedDefinitionKindV2Schema = z.enum([
   "source_contract",
+  "source_access_policy",
   "mapping_spec",
   "methodology_bundle",
   "borrowing_base_policy_v2",
@@ -497,6 +499,7 @@ export function computeDefinitionImpactPreviewV1(
   }
   const capabilityMap: Record<GovernedDefinitionKindV2, readonly string[]> = {
     source_contract: ["certification", "ingestion"],
+    source_access_policy: ["analytics", "authorization", "certification"],
     mapping_spec: ["certification", "mapping"],
     methodology_bundle: ["analytics", "replay"],
     borrowing_base_policy_v2: ["borrowing_base", "monitoring"],
@@ -553,6 +556,14 @@ export function validateGovernedDefinitionDocumentV2(
           parseSourceContractV1({ ...body, sourceContractHash: canonicalHash(body) }),
           `${kind} document`
         );
+      }
+      case "source_access_policy": {
+        const parsed = parseSourceAccessPolicyV1(document);
+        tenantMatch(parsed.tenantId, tenantId, kind);
+        logicalIdentity(parsed.policyId, definitionKey, kind);
+        documentVersion(parsed.revision, semanticVersion, kind);
+        effectivityMatch(parsed.effectiveFrom, parsed.effectiveTo, effectiveFrom, effectiveTo, kind);
+        return canonicalClone(parsed, `${kind} document`);
       }
       case "mapping_spec": {
         const parsed = parseMappingSpecV2(document);
