@@ -23,7 +23,7 @@ body:
         - Local MCP
         - Operator control plane
         - Analytics or domain logic
-        - Deployment or CI
+        - Deployment or release verification
         - Documentation
     validations:
       required: true

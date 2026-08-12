@@ -186,8 +186,8 @@ For a suspected data-boundary incident:
 4. Determine tenant, principal, tools, dataset/snapshot, policy/mapping versions, result handles, and exact time window.
 5. Restore service only after cross-tenant canaries, replay tests, policy tests, and audit continuity pass.
 
-## CI evidence and known gaps
+## Local release evidence and known gaps
 
-`.github/workflows/ci.yml` runs locked installation, type checks, tests, build, production dependency audit, workflow lint, Compose rendering, Kustomize rendering, strict Kubernetes schema checks, Dockerfile checks, IaC scan, non-root/read-only container smoke, CycloneDX SBOM generation, image vulnerability scan, and repository secret scan. Actions and scanner images are pinned by commit/digest.
+This repository intentionally contains no GitHub Actions workflow, and GitHub Actions is disabled in the repository settings. Operators run the locked installation, type checks, tests, build, production dependency audit, Compose rendering, Kustomize rendering, strict Kubernetes schema checks, Dockerfile checks, IaC scan, non-root/read-only container smoke, CycloneDX SBOM generation, image vulnerability scan, and repository secret scan from a trusted local or explicitly approved build environment. Scanner images and tool versions remain pinned by digest or version where the documented commands specify them.
 
-CI does not publish, sign, or deploy an image because no registry, signing identity, cluster, or environment has been authorized in this repository. A delivery workflow must add keyless or KMS-backed signing, provenance attestation, registry retention, environment approvals, digest promotion, canary verification, and rollback evidence before this can be called deployed.
+Manual verification does not publish, sign, or deploy an image because no registry, signing identity, cluster, or environment has been authorized in this repository. Any future delivery system must add keyless or KMS-backed signing, provenance attestation, registry retention, environment approvals, digest promotion, canary verification, and rollback evidence before this can be called deployed; it must not use GitHub Actions unless the repository owner explicitly changes this policy.

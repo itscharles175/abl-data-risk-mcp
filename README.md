@@ -5,7 +5,6 @@
 <h1 align="center">ABL Data &amp; Risk MCP</h1>
 
 <p align="center">
-  <a href="https://github.com/stag175/abl-data-risk-mcp/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/stag175/abl-data-risk-mcp/actions/workflows/ci.yml/badge.svg" /></a>
   <img alt="Node.js 22.13 or newer" src="https://img.shields.io/badge/Node.js-%E2%89%A522.13-339933?logo=nodedotjs&amp;logoColor=white" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&amp;logoColor=white" />
   <img alt="MCP 2025 and 2026" src="https://img.shields.io/badge/MCP-2025%20%2B%202026-7257fa" />
@@ -61,7 +60,7 @@ Implemented foundations include:
 - durable principal-bound jobs authorized by short-lived signed, replay-protected execution plans;
 - deterministic snapshot stratification, vintage analysis, AR borrowing-base reperformance, monitoring, durable alert deduplication, and case transitions;
 - a remote OAuth/OIDC resource server with exact issuer/audience/resource validation, server-side tenant membership, policy evaluation, Host/Origin controls, rate limits, concurrency limits, liveness, and readiness;
-- a hardened Dockerfile, Compose template, Kubernetes base, CI checks, operations guide, and release checklist.
+- a hardened Dockerfile, Compose template, Kubernetes base, operator-run release checks, operations guide, and release checklist.
 
 There is no generic SQL tool, source-system write, raw-row MCP tool, arbitrary callback/recipient field, or autonomous credit decision.
 
@@ -204,9 +203,9 @@ Monitoring evaluates typed, effective-dated decimal or boolean thresholds only a
 - [Dockerfile](./Dockerfile) builds a non-root, read-only production image; its default command remains the safe local STDIO surface.
 - [deploy/compose.yaml](./deploy/compose.yaml) explicitly selects `dist/remote-cli.js` under the `remote` profile and binds the published port to loopback.
 - [deploy/kubernetes](./deploy/kubernetes) provides a one-replica `Recreate` base with ClusterIP service, persistent control/artifact storage, hardened security contexts, probes, and default-deny networking.
-- [.github/workflows/ci.yml](./.github/workflows/ci.yml) defines locked verification, deployment rendering/schema checks, IaC/secret/image scans, SBOM generation, and container smoke checks.
+- [docs/OPERATIONS.md](./docs/OPERATIONS.md) defines the operator-run verification, deployment rendering/schema checks, IaC/secret/image scans, SBOM generation, and container smoke checks.
 
-These are reviewed templates and CI definitions, not evidence that a public environment has been deployed.
+These are reviewed templates and manual verification instructions, not evidence that a public environment has been deployed. This repository intentionally has GitHub Actions disabled.
 
 ## Verification
 
