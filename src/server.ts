@@ -15,6 +15,10 @@ import {
 import type { SourceRegistry } from "./infrastructure/sql/registry.js";
 import { MCP_SERVER_NAME, MCP_SERVER_VERSION } from "./product.js";
 import { runStratification, runVintageAnalysis, type BucketSpec } from "./services/analysis.js";
+import {
+  runLocalStratificationPreviewV2,
+  runLocalVintagePreviewV2
+} from "./services/local-preview-v2.js";
 
 export const SERVER_NAME = MCP_SERVER_NAME;
 export const SERVER_VERSION = MCP_SERVER_VERSION;
@@ -122,6 +126,23 @@ const mappingValidationSchema = z.object({
     mappedRequiredFields: z.number().int(),
     missingRequiredFields: z.array(z.string())
   })
+});
+
+const exactBucketSchema = z.object({
+  label: z.string().min(1).max(80),
+  lower: z.string().regex(/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/).optional(),
+  upper: z.string().regex(/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/).optional(),
+  include_lower: z.boolean().optional(),
+  include_upper: z.boolean().optional()
+}).strict();
+
+const snapshotLineageSchema = z.object({
+  snapshotHash: z.string(),
+  mappingHash: z.string(),
+  dictionaryHash: z.string(),
+  recipeHash: z.string(),
+  sourceIsImmutableSnapshot: z.literal(true),
+  analysisHash: z.string()
 });
 
 const readOnlyAnnotations = {
@@ -499,6 +520,128 @@ export function buildServer(services: ServerServices): McpServer {
         context.mcpReq.signal.throwIfAborted();
         return toolResult(analysis);
       })
+  );
+
+  server.registerTool(
+    "abl_run_stratification_v2",
+    {
+      title: "Preview deterministic snapshot stratification v2",
+      description:
+        "Materialize a bounded allowlisted projection and run the same exact-decimal deterministic engine used by governed jobs. This local preview is not a certification.",
+      inputSchema: z.object({
+        source_id: sourceIdSchema,
+        table: tableSchema,
+        as_of_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        mappings: z.array(mappingSchema).min(1).max(200),
+        dimension: z.string().min(1).max(128),
+        balance_field: z.string().min(1).max(128).optional(),
+        buckets: z.array(exactBucketSchema).max(100).optional(),
+        weighted_average_fields: z.array(z.string().min(1).max(128)).max(5).optional()
+      }).strict(),
+      outputSchema: z.object({
+        analysisType: z.literal("snapshot_stratification"),
+        asOfDate: z.string(),
+        dimension: z.string(),
+        balanceField: z.string(),
+        rows: z.array(z.object({
+          bucket: z.string(),
+          loanCount: z.number().int().nullable(),
+          balance: z.string().nullable(),
+          balanceShare: z.string().nullable(),
+          weightedAverages: z.record(z.string(), z.string().nullable()),
+          suppressed: z.boolean()
+        })),
+        totals: z.object({ loanCount: z.number().int(), balance: z.string() }),
+        reconciliation: z.object({ passed: z.literal(true), bucketBalanceDifference: z.literal("0") }),
+        lineage: snapshotLineageSchema,
+        warnings: z.array(z.string())
+      }),
+      annotations: readOnlyAnnotations
+    },
+    async (args, context) => guarded(async () => {
+      context.mcpReq.signal.throwIfAborted();
+      const adapter = services.registry.get(args.source_id);
+      const resolved = await adapter.resolveTable(args.table);
+      const sourceColumns = (await adapter.describeTable(resolved)).map(toSourceColumn);
+      const validation = validateFieldMappings(sourceColumns, args.mappings, "stratification");
+      if (!validation.ready) return errorResult("MAPPING_NOT_READY", validation);
+      const result = await runLocalStratificationPreviewV2(adapter, {
+        table: resolved,
+        mappings: args.mappings,
+        asOfDate: args.as_of_date,
+        dimension: args.dimension,
+        ...(args.balance_field ? { balanceField: args.balance_field } : {}),
+        ...(args.buckets ? {
+          buckets: args.buckets.map((bucket) => ({
+            label: bucket.label,
+            ...(bucket.lower === undefined ? {} : { lower: bucket.lower }),
+            ...(bucket.upper === undefined ? {} : { upper: bucket.upper }),
+            ...(bucket.include_lower === undefined ? {} : { includeLower: bucket.include_lower }),
+            ...(bucket.include_upper === undefined ? {} : { includeUpper: bucket.include_upper })
+          }))
+        } : {}),
+        ...(args.weighted_average_fields ? { weightedAverageFields: args.weighted_average_fields } : {}),
+        minimumCohortSize: services.config.analysis.minimumCohortSize,
+        maxGroups: services.config.analysis.maxGroups
+      });
+      context.mcpReq.signal.throwIfAborted();
+      return toolResult(result);
+    })
+  );
+
+  server.registerTool(
+    "abl_run_vintage_v2",
+    {
+      title: "Preview deterministic vintage v2",
+      description:
+        "Materialize bounded longitudinal records and run the governed exact-decimal vintage engine with fixed denominators and explicit availability. This local preview is not a certification.",
+      inputSchema: z.object({
+        source_id: sourceIdSchema,
+        table: tableSchema,
+        mappings: z.array(mappingSchema).min(1).max(200),
+        cohort_grain: z.enum(["month", "quarter", "year"]).default("quarter"),
+        as_of_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        max_months_on_book: z.number().int().min(0).max(600).default(120),
+        delinquency_threshold_days: z.number().int().min(1).max(999).default(30)
+      }).strict(),
+      outputSchema: z.object({
+        analysisType: z.literal("snapshot_vintage"),
+        cohortGrain: z.enum(["month", "quarter", "year"]),
+        analysisAsOfDate: z.string().nullable(),
+        points: z.array(z.object({
+          cohort: z.string(), monthsOnBook: z.number().int(), seasoned: z.boolean(), available: z.boolean(),
+          originalCohortLoanCount: z.number().int().nullable(), observedLoanCount: z.number().int().nullable(),
+          originalCohortBalance: z.string().nullable(), currentBalance: z.string().nullable(),
+          remainingBalanceFactor: z.string().nullable(), cumulativeNetLoss: z.string().nullable(),
+          cumulativeNetLossRate: z.string().nullable(), delinquentBalance: z.string().nullable(),
+          delinquentBalanceRate: z.string().nullable(), suppressed: z.boolean()
+        })),
+        metricAvailability: z.object({ cumulativeNetLoss: z.boolean(), delinquency: z.boolean() }),
+        lineage: snapshotLineageSchema,
+        warnings: z.array(z.string())
+      }),
+      annotations: readOnlyAnnotations
+    },
+    async (args, context) => guarded(async () => {
+      context.mcpReq.signal.throwIfAborted();
+      const adapter = services.registry.get(args.source_id);
+      const resolved = await adapter.resolveTable(args.table);
+      const sourceColumns = (await adapter.describeTable(resolved)).map(toSourceColumn);
+      const validation = validateFieldMappings(sourceColumns, args.mappings, "vintage");
+      if (!validation.ready) return errorResult("MAPPING_NOT_READY", validation);
+      const result = await runLocalVintagePreviewV2(adapter, {
+        table: resolved,
+        mappings: args.mappings,
+        cohortGrain: args.cohort_grain,
+        ...(args.as_of_date ? { asOfDate: args.as_of_date } : {}),
+        maxMonthsOnBook: args.max_months_on_book,
+        delinquencyThresholdDays: args.delinquency_threshold_days,
+        minimumCohortSize: services.config.analysis.minimumCohortSize,
+        maxPoints: services.config.analysis.maxVintagePoints
+      });
+      context.mcpReq.signal.throwIfAborted();
+      return toolResult(result);
+    })
   );
 
   server.registerResource(

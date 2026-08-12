@@ -16,7 +16,7 @@ MCP interoperability belongs to the host or client, not to the language model. C
 | Local compatibility MCP | `dist/cli.js` | STDIO by default; optional loopback-only Streamable HTTP | Operator-allowlisted live SQLite/PostgreSQL metadata and aggregate analyses. Not a certified artifact workflow. |
 | Operator control plane | `dist/operator/main.js` | One strict JSON-file command per process | Trusted ingestion, certification, governance transitions, membership administration, and audit inspection. Not registered as MCP. |
 
-The local surface retains the original nine direct-source tools and supports both tested MCP protocol eras. “Legacy” here means the earlier direct-source product surface, not that STDIO is limited to one wire revision.
+The local surface retains the original nine direct-source tools, adds deterministic stratification-v2 and vintage-v2 previews, and supports both tested MCP protocol eras. “Legacy” here means the earlier direct-source product surface, not that STDIO is limited to one wire revision. The v2 calls share the governed snapshot-analysis engines but remain previews rather than certification artifacts.
 
 ## Runtime topology
 

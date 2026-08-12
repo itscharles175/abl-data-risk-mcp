@@ -62,6 +62,8 @@ Implemented foundations include:
 - a remote OAuth/OIDC resource server with exact issuer/audience/resource validation, server-side tenant membership, policy evaluation, Host/Origin controls, rate limits, concurrency limits, liveness, and readiness;
 - a hardened Dockerfile, Compose template, Kubernetes base, operator-run release checks, operations guide, and release checklist.
 
+The additive portfolio-platform upgrade also includes versioned source-contract, snapshot-v2, mapping-spec/application, dictionary-v2, and certified-population contracts; deterministic portfolio-surveillance and multi-component ABL engines; governed investigation, disclosure-ledger, pipeline, notification, connector, report-signing, adapter-conformance, shared-persistence, and privacy-safe telemetry modules; and a React/TypeScript review console with an OIDC-capable BFF. These upgrade modules are at different integration levels. The exact code-versus-environment status and next integration blockers are tracked in [Upgrade Implementation Status](./docs/UPGRADE_IMPLEMENTATION.md) and [Upgrade Checkpoint](./docs/UPGRADE_CHECKPOINT.md).
+
 There is no generic SQL tool, source-system write, raw-row MCP tool, arbitrary callback/recipient field, or autonomous credit decision.
 
 ## Governed lifecycle
@@ -94,7 +96,7 @@ The production server exposes 17 tools:
 
 `abl_start_job` supports `snapshot_stratification`, `snapshot_vintage`, `ar_borrowing_base`, and `monitoring`. Job and result access uses opaque handles bound to the verified principal. Mapping proposals never self-approve or self-activate.
 
-The legacy local server exposes the original nine direct-source tools: `abl_capabilities`, source/table discovery, dictionary lookup, mapping suggestion/validation, stratification, and vintage. It remains useful for local exploration and compatibility testing, but its live-table analyses are not certified governed artifacts.
+The local server exposes the original nine direct-source tools plus additive `abl_run_stratification_v2` and `abl_run_vintage_v2` previews. The v2 previews materialize a bounded allowlisted projection and invoke the same deterministic snapshot engines used by governed jobs. They remain local previews, not certification artifacts.
 
 ## Quick start
 
@@ -188,6 +190,17 @@ The local operator executable is a privileged global-administration boundary. It
 
 Trusted SQL snapshot extraction additionally uses `ABL_OPERATOR_SQL_POLICIES_FILE`. Every policy is bound to exactly one tenant and a dedicated physical table (`tenantIsolation: "dedicated_relation"`, `relationKind: "table"`), and contains opaque dataset/relation/column IDs, validated physical identifiers, exact-text/native encodings, an attested unique order, optional required watermark, and row/column/cell/byte/time limits. Extraction requests cannot contain SQL, credentials, connection strings, filesystem paths, filters, expressions, joins, or URLs.
 
+### Review/admin console
+
+The workspace includes `apps/console`, `apps/bff`, and `apps/contracts`. For the explicitly labeled local fixture experience:
+
+```sh
+pnpm run dev:bff
+pnpm run dev:console
+```
+
+Production mode requires the BFF's OIDC Authorization Code + PKCE configuration, secure HTTP-only sessions, an approved control-API adapter, and TLS. The browser never calls MCP directly and must never receive service credentials. Until the tenant-aware control adapter and durable session backend are wired, the console is a reviewable fixture/conformance surface rather than a deployed administration plane.
+
 ## Deterministic analytical semantics
 
 Snapshot stratification uses canonical-field-keyed records, exact decimal arithmetic, explicit validated buckets, stable ordering, fixed execution bounds, totals reconciliation, minimum-cell suppression, and complementary suppression. Restricted identifier-like fields cannot appear in published dimensions or weighted outputs.
@@ -211,9 +224,13 @@ These are reviewed templates and manual verification instructions, not evidence 
 
 ```sh
 pnpm run verify
+pnpm run verify:integration
+pnpm run verify:security
+# Run only from a clean, immutable checkpoint:
+pnpm run release:verify
 ```
 
-The suite covers protocol-era compatibility, local and authenticated HTTP boundaries, OAuth/JWKS verification, live membership and policy reauthorization, immutable/version-guarded stores, encrypted artifacts, replay-protected claim-time plans, bounded worker execution and crash recovery, queue leases/reaping, ingestion and certification, exact domain calculations, disclosure controls, alerts, operator identity, and fake-pool PostgreSQL cursor/transaction/cancellation behavior.
+The fast suite covers protocol-era compatibility, local and authenticated HTTP boundaries, OAuth/JWKS verification, membership and policy reauthorization, immutable/version-guarded stores, encrypted artifacts, replay-protected claim-time plans, bounded worker execution and crash recovery, queue leases/reaping, ingestion and certification, exact domain calculations, disclosure controls, alerts, operator identity, console/BFF behavior, and fake-backed adapter/shared-service behavior. Integration and security orchestration distinguish local conformance evidence from opt-in live environment gates. All verification is operator-run; GitHub Actions remains disabled.
 
 ## Honest limits
 
@@ -224,7 +241,10 @@ The suite covers protocol-era compatibility, local and authenticated HTTP bounda
 - The durable deployment base uses local SQLite control stores and encrypted filesystem artifacts, so it is one replica with `Recreate`; horizontal scale requires external transactional stores and distributed lease evidence.
 - Durable SQLite stores are greenfield/component-registry deployments. An arbitrary pre-registry database is not an approved in-place upgrade source; migrate it offline with an explicitly reviewed, backed-up migration plan (only the documented legacy alert metadata shape has automatic adoption).
 - Audit rows are append-only in the local control stores, but export to a separately administered WORM audit system is still an operational integration.
-- CSV, JSON, NDJSON, SQLite, and PostgreSQL snapshot extraction are implemented. XLSX, Parquet, Snowflake, BigQuery, SQL Server, MySQL, and other adapters are not certified claims.
+- CSV, JSON, NDJSON, SQLite, and PostgreSQL snapshot extraction are implemented. Hardened XLSX, Parquet, and immutable object-storage preflight/conformance adapters are present, but their production decoder/provider implementations and live certification remain external gates. Snowflake, BigQuery, SQL Server, MySQL, and other adapters are not certified claims.
+- The portfolio console currently uses clearly labeled fixture data. Its OIDC-capable BFF and review journeys are implemented, but a live control API, durable session service, tenant-aware administration backend, and deployed IdP remain integration gates.
+- The new surveillance, ABL-v2, pipeline, connector, shared PostgreSQL/S3, and analyst-tool modules are not all composed into the production remote runtime yet. They must not be represented as deployed capabilities until the checkpoint integration work is complete.
+- Borrowing-base and monitoring sidecar artifacts remain blocked from upgrade release approval until their certified-population lineage is enforced in `GovernedWorkflow`; see the checkpoint document for the reproduced integrity gap.
 - There is intentionally no arbitrary SQL, source write, or raw-row MCP tool.
 
-For deeper design and operating details, see [Architecture](./docs/ARCHITECTURE.md), [Security](./docs/SECURITY.md), [Product Blueprint](./docs/PRODUCT_BLUEPRINT.md), [Roadmap](./docs/ROADMAP.md), [Operations](./docs/OPERATIONS.md), and the [Release Checklist](./docs/RELEASE_CHECKLIST.md).
+For deeper design and operating details, see [Architecture](./docs/ARCHITECTURE.md), [Security](./docs/SECURITY.md), [Product Blueprint](./docs/PRODUCT_BLUEPRINT.md), [Roadmap](./docs/ROADMAP.md), [Upgrade Implementation Status](./docs/UPGRADE_IMPLEMENTATION.md), [Upgrade Checkpoint](./docs/UPGRADE_CHECKPOINT.md), [Operator Verification](./docs/OPERATOR_VERIFICATION.md), [Operations](./docs/OPERATIONS.md), and the [Release Checklist](./docs/RELEASE_CHECKLIST.md).

@@ -1,0 +1,29 @@
+{
+  "name": "@abl/platform-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "vite --host 127.0.0.1 --port 4173",
+    "preview": "vite preview --host 127.0.0.1 --port 4173",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@abl/platform-contracts": "workspace:*",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.2",
+    "jsdom": "28.0.0",
+    "typescript": "7.0.2",
+    "vite": "7.3.6",
+    "vitest": "4.0.18"
+  }
+}

@@ -28,13 +28,23 @@
   "scripts": {
     "audit:prod": "pnpm audit --prod",
     "build": "tsc -p tsconfig.json",
+    "build:platform": "pnpm --filter @abl/platform-contracts build && pnpm --filter @abl/platform-bff build && pnpm --filter @abl/platform-console build",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "check:platform": "pnpm --filter @abl/platform-contracts build && pnpm --filter @abl/platform-contracts check && pnpm --filter @abl/platform-bff check && pnpm --filter @abl/platform-console check",
     "dev": "tsx src/cli.ts",
+    "dev:bff": "pnpm --filter @abl/platform-bff dev",
+    "dev:console": "pnpm --filter @abl/platform-console dev",
+    "dev:platform": "pnpm --parallel --filter @abl/platform-contracts --filter @abl/platform-bff --filter @abl/platform-console dev",
     "operator": "node dist/operator/main.js",
     "start": "node dist/cli.js",
     "start:remote": "node dist/remote-cli.js",
     "test": "tsx --test tests/**/*.test.ts",
-    "verify": "pnpm run check && pnpm run test && pnpm run build"
+    "test:platform": "pnpm --filter @abl/platform-contracts build && pnpm --filter @abl/platform-contracts test && pnpm --filter @abl/platform-bff test && pnpm --filter @abl/platform-console test",
+    "verify": "pnpm run check && pnpm run test && pnpm run build && pnpm run verify:platform",
+    "verify:integration": "node scripts/verify-integration.mjs",
+    "verify:platform": "pnpm run check:platform && pnpm run test:platform && pnpm run build:platform",
+    "verify:security": "node scripts/verify-security.mjs",
+    "release:verify": "node scripts/verify-release.mjs"
   },
   "engines": {
     "node": ">=22.13"
