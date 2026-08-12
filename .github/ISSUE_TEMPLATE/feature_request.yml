@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a governed capability or workflow improvement.
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operating problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed capability
+    validations:
+      required: true
+  - type: textarea
+    id: controls
+    attributes:
+      label: Governance and risk considerations
+      description: Describe tenancy, authorization, data sensitivity, determinism, audit, and migration implications.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Boundary confirmation
+      options:
+        - label: This proposal does not depend on model-enforced authorization or ungoverned source writes.
+          required: true

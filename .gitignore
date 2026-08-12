@@ -11,3 +11,4 @@ config/local.json
 *.sqlite3
 .DS_Store
 coverage/
+.codex/config.toml

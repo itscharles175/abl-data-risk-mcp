@@ -1,12 +1,44 @@
-# ABL Data & Risk MCP
+<p align="center">
+  <img src="./docs/assets/abl-mcp-banner.svg" alt="ABL Data & Risk MCP — governed loan-tape analytics" width="100%" />
+</p>
 
-A governed, model-independent MCP system for asset-based lending (ABL) and longitudinal loan-tape analytics.
+<h1 align="center">ABL Data &amp; Risk MCP</h1>
+
+<p align="center">
+  <a href="https://github.com/stag175/abl-data-risk-mcp/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/stag175/abl-data-risk-mcp/actions/workflows/ci.yml/badge.svg" /></a>
+  <img alt="Node.js 22.13 or newer" src="https://img.shields.io/badge/Node.js-%E2%89%A522.13-339933?logo=nodedotjs&amp;logoColor=white" />
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&amp;logoColor=white" />
+  <img alt="MCP 2025 and 2026" src="https://img.shields.io/badge/MCP-2025%20%2B%202026-7257fa" />
+  <a href="./.github/SECURITY.md"><img alt="Security policy" src="https://img.shields.io/badge/security-policy-0b7a53" /></a>
+</p>
+
+<p align="center">
+  <strong>A governed, model-independent MCP system for asset-based lending and longitudinal loan-tape analytics.</strong>
+</p>
+
+<p align="center">
+  <a href="#why-this-exists">Why</a> ·
+  <a href="#what-is-implemented">Capabilities</a> ·
+  <a href="#governed-lifecycle">Architecture</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="./docs/SECURITY.md">Security</a> ·
+  <a href="./docs/OPERATIONS.md">Operations</a>
+</p>
+
+## Why this exists
 
 The product is deliberately narrower than “chat with SQL”:
 
 > An MCP-capable client may express intent, propose a mapping, and explain a result. Trusted deterministic code authenticates, authorizes, maps, validates, calculates, suppresses, reconciles, and records lineage.
 
 Codex, Claude Code, Claude Desktop, and other products can use this server only when the product supplies a compatible MCP client. The underlying language model does not become MCP-compatible by itself, and this repository does not claim compatibility with every model or host.
+
+| Principle | What it means here |
+|---|---|
+| Governed, not conversational SQL | Models express intent; deterministic services enforce identity, policy, mappings, calculations, suppression, and lineage. |
+| Aggregate by default | There is no generic SQL, source-write, raw-row, arbitrary callback, or autonomous credit-decision tool. |
+| Reproducible ABL analytics | Exact-decimal stratification, vintage, borrowing-base, DQ, reconciliation, and monitoring run against immutable certified inputs. |
+| Portable MCP | One TypeScript server supports Codex, Claude, and other MCP-capable hosts over STDIO or authenticated Streamable HTTP. |
 
 ## What is implemented
 

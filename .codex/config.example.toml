@@ -1,0 +1,18 @@
+[mcp_servers.gitnexus]
+command = "pnpm"
+args = [
+  "--allow-build=@ladybugdb/core",
+  "--allow-build=gitnexus",
+  "--allow-build=tree-sitter",
+  "dlx",
+  "gitnexus@1.6.9",
+  "mcp"
+]
+required = true
+startup_timeout_sec = 60
+tool_timeout_sec = 60
+
+[mcp_servers.gitnexus.env]
+GITNEXUS_MCP_ALLOWED_REPOS = "/absolute/path/to/abl-data-risk-mcp"
+GITNEXUS_MCP_DEFAULT_REPO = "/absolute/path/to/abl-data-risk-mcp"
+GITNEXUS_MCP_DEFAULT_MAX_TOKENS = "6000"

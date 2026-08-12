@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title description">
+  <title id="title">ABL Data and Risk MCP</title>
+  <desc id="description">A governed bridge from loan data to deterministic risk analytics.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07152b"/>
+      <stop offset="0.55" stop-color="#102b4e"/>
+      <stop offset="1" stop-color="#0d3b45"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#53d8fb"/>
+      <stop offset="1" stop-color="#7cf2c4"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1200" height="320" rx="28" fill="url(#background)"/>
+  <g opacity="0.12" stroke="#a5d8ff">
+    <path d="M0 72H1200M0 160H1200M0 248H1200"/>
+    <path d="M120 0V320M360 0V320M600 0V320M840 0V320M1080 0V320"/>
+  </g>
+  <g transform="translate(80 66)">
+    <rect x="0" y="25" width="116" height="136" rx="22" fill="#0a213d" stroke="#53d8fb" stroke-width="3"/>
+    <path d="M28 62h60M28 93h60M28 124h36" stroke="#b9e9ff" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="96" cy="135" r="24" fill="#102b4e" stroke="#7cf2c4" stroke-width="5"/>
+    <path d="M96 123v24M84 135h24" stroke="#7cf2c4" stroke-width="5" stroke-linecap="round"/>
+    <path d="M132 93h84" stroke="url(#accent)" stroke-width="5" stroke-linecap="round" filter="url(#glow)"/>
+    <circle cx="236" cy="93" r="24" fill="#102b4e" stroke="#53d8fb" stroke-width="5"/>
+    <path d="M229 84h14M229 93h14M229 102h14" stroke="#b9e9ff" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <text x="365" y="125" fill="#f5fbff" font-size="46" font-weight="750" letter-spacing="-1.2">ABL Data &amp; Risk MCP</text>
+    <text x="367" y="174" fill="#b9d7ea" font-size="20" font-weight="450">Governed loan-tape analytics for MCP-capable clients</text>
+    <g transform="translate(367 210)" font-size="15" font-weight="650" letter-spacing="0.8">
+      <rect width="150" height="38" rx="19" fill="#123b58" stroke="#53d8fb"/>
+      <text x="75" y="25" text-anchor="middle" fill="#d8f6ff">DETERMINISTIC</text>
+      <rect x="166" width="142" height="38" rx="19" fill="#123b58" stroke="#7cf2c4"/>
+      <text x="237" y="25" text-anchor="middle" fill="#dcfff1">TENANT-SCOPED</text>
+      <rect x="324" width="145" height="38" rx="19" fill="#123b58" stroke="#53d8fb"/>
+      <text x="396.5" y="25" text-anchor="middle" fill="#d8f6ff">AUDITABLE</text>
+    </g>
+  </g>
+</svg>

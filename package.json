@@ -2,7 +2,23 @@
   "name": "abl-mcp-server",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.16.0",
   "description": "A model-agnostic MCP server for governed ABL and loan-tape analytics.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stag175/abl-data-risk-mcp.git"
+  },
+  "homepage": "https://github.com/stag175/abl-data-risk-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/stag175/abl-data-risk-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "asset-based-lending",
+    "credit-risk",
+    "loan-analytics"
+  ],
   "type": "module",
   "bin": {
     "abl-mcp": "dist/cli.js",
