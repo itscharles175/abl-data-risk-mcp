@@ -397,6 +397,96 @@ test("minimum-cell privacy performs deterministic complementary suppression", ()
   assert.ok(shares.filter(({ suppressed }) => suppressed).every(({ value, coverage }) => value === null && coverage.ratio === null));
 });
 
+test("zero-event and small-complement ratios suppress the full denominator population", () => {
+  const definition = {
+    ...metric("privacy-defaults", {
+      kind: "default_ever",
+      defaultFlagField: "default_flag",
+      daysPastDueField: "days_past_due",
+      balanceField: "outstanding_balance",
+      everDpdThresholds: [30],
+      incidenceBasis: "count"
+    }),
+    privacy: { minimumCellCount: 3, complementarySuppression: true as const }
+  };
+  const opening = [
+    record("2024-01-31", "P1", { outstanding_balance: "10" }),
+    record("2024-01-31", "P2", { outstanding_balance: "20" })
+  ];
+  const closing = [
+    record("2024-02-29", "P1", { outstanding_balance: "10" }),
+    record("2024-02-29", "P2", { outstanding_balance: "20" })
+  ];
+  const zeroEvent = runPortfolioSurveillance(
+    input({
+      snapshots: [
+        snapshot("privacy-open", "2024-01-31", "a", opening),
+        snapshot("privacy-close", "2024-02-29", "b", closing)
+      ],
+      metricDefinitions: [definition]
+    })
+  ).metrics[0]!.cells.find(
+    ({ metric, dimensions }) =>
+      metric === "default_incidence" && dimensions.currentAsOfDate === "2024-02-29"
+  )!;
+  assert.equal(zeroEvent.suppressed, true);
+  assert.deepEqual(zeroEvent.coverage, { observedCount: null, eligibleCount: null, ratio: null });
+  assert.equal(zeroEvent.lineage.populationHash, zeroEvent.lineage.denominatorPopulationHash);
+  assert.notEqual(
+    zeroEvent.lineage.numeratorPopulationHash,
+    zeroEvent.lineage.denominatorPopulationHash
+  );
+
+  const complementDefinition = {
+    ...definition,
+    privacy: { minimumCellCount: 2, complementarySuppression: true as const }
+  };
+  const threeOpening = [
+    ...opening,
+    record("2024-01-31", "P3", { outstanding_balance: "30" })
+  ];
+  const threeClosing = [
+    record("2024-02-29", "P1", { outstanding_balance: "10", default_flag: true }),
+    record("2024-02-29", "P2", { outstanding_balance: "20", default_flag: true }),
+    record("2024-02-29", "P3", { outstanding_balance: "30" })
+  ];
+  const smallComplement = runPortfolioSurveillance(
+    input({
+      snapshots: [
+        snapshot("complement-open", "2024-01-31", "a", threeOpening),
+        snapshot("complement-close", "2024-02-29", "b", threeClosing)
+      ],
+      metricDefinitions: [complementDefinition]
+    })
+  ).metrics[0]!.cells.find(
+    ({ metric, dimensions }) =>
+      metric === "default_incidence" && dimensions.currentAsOfDate === "2024-02-29"
+  )!;
+  assert.equal(smallComplement.suppressed, true);
+  assert.equal(smallComplement.value, null);
+});
+
+test("resolved entity tokens are deterministic within a tenant and unlinkable across tenants", () => {
+  const definition = METRICS.find(({ family }) => family === "concentration")!;
+  const tenantA = runPortfolioSurveillance(
+    input({ snapshots: [snapshot("tenant-a-snapshot", "2024-01-31", "a", JAN)], metricDefinitions: [definition] })
+  );
+  const tenantB = runPortfolioSurveillance({
+    ...input(),
+    tenantId: "tenant-b",
+    snapshots: [{ ...snapshot("tenant-b-snapshot", "2024-01-31", "a", JAN), tenantId: "tenant-b" }],
+    metricDefinitions: [definition],
+    entityResolutionDefinitions: [{ ...ENTITY_RESOLUTION, tenantId: "tenant-b" }]
+  });
+  const categories = (result: ReturnType<typeof runPortfolioSurveillance>) =>
+    result.metrics[0]!.cells
+      .filter(({ metric }) => metric === "concentration_share")
+      .map(({ dimensions }) => dimensions.category)
+      .sort();
+  assert.deepEqual(categories(tenantA), categories(tenantA));
+  assert.notDeepEqual(categories(tenantA), categories(tenantB));
+});
+
 test("execution bounds and certification tenant boundaries are enforced before analysis", () => {
   assert.throws(
     () => runPortfolioSurveillance(input({ bounds: { maxSnapshots: 2, maxRecords: 1_000, maxMetrics: 100, maxCells: 100_000 } })),
@@ -416,6 +506,28 @@ test("execution bounds and certification tenant boundaries are enforced before a
       ),
     /lowercase SHA-256/
   );
+  assert.throws(
+    () =>
+      runPortfolioSurveillance(
+        input({
+          snapshots: [
+            {
+              ...input().snapshots[0]!,
+              asOfDate: "2027-01-31",
+              certification: {
+                ...input().snapshots[0]!.certification,
+                certifiedAt: "2026-08-12T12:00:00.000Z"
+              },
+              records: input().snapshots[0]!.records.map((recordValue) => ({
+                ...recordValue,
+                as_of_date: "2027-01-31"
+              }))
+            }
+          ]
+        })
+      ),
+    /after its certification/
+  );
   const unresolvedOne = metric("unresolved-one", {
     kind: "concentration",
     dimensionField: "borrower_id",
@@ -433,6 +545,6 @@ test("execution bounds and certification tenant boundaries are enforced before a
           bounds: { maxSnapshots: 12, maxRecords: 1_000, maxMetrics: 100, maxCells: 1 }
         })
       ),
-    /pack produced 2 cells/
+    /exhausted execution maxCells|remaining execution cell budget/
   );
 });

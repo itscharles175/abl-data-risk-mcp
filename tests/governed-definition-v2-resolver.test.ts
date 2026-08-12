@@ -79,6 +79,50 @@ test("resolver derives engine approval only from the durable lifecycle", () => {
   store.close();
 });
 
+test("resolver validates withdrawn terminal history before rejecting execution", () => {
+  const store = fixture();
+  const proposed = store.propose(metricProposal("metric-withdrawn", "1.0.0", "2026-01-01", 12));
+  const validated = transition(store, proposed, "validated", "real-checker", "withdrawn-validated");
+  const approved = transition(store, validated, "approved", "real-checker", "withdrawn-approved");
+  const withdrawn = store.transition({
+    tenantId: "tenant-a",
+    definitionVersionId: approved.version.definitionVersionId,
+    toStatus: "withdrawn",
+    expectedRevision: approved.lifecycleRevision,
+    actor: "withdrawal-checker",
+    evidence: { reason: "review rejected the candidate" },
+    idempotencyKey: "withdrawn-terminal"
+  });
+  assert.throws(
+    () =>
+      new GovernedDefinitionV2Resolver(store).resolveFrozen({
+        tenantId: "tenant-a",
+        definitionVersionId: withdrawn.version.definitionVersionId
+      }),
+    (error: unknown) => resolverError(error, "UNAPPROVED")
+  );
+
+  const makerWithdrawalEvents = rehashAuditEvents(store.listAuditEvents("tenant-a"), (event) =>
+    event.toStatus === "withdrawn" ? { ...event, actor: "real-maker" } : event
+  );
+  const forgedView = { ...withdrawn, lastTransitionBy: "real-maker" };
+  const forgedAuthority: GovernedDefinitionV2AuthorityPort = {
+    get: () => forgedView,
+    selectEffective: () => forgedView,
+    listAuditEvents: (_tenantId, afterSequence = 0, limit = 100) =>
+      makerWithdrawalEvents.filter((event) => event.sequence > afterSequence).slice(0, limit)
+  };
+  assert.throws(
+    () =>
+      new GovernedDefinitionV2Resolver(forgedAuthority).resolveFrozen({
+        tenantId: "tenant-a",
+        definitionVersionId: withdrawn.version.definitionVersionId
+      }),
+    (error: unknown) => resolverError(error, "INTEGRITY_FAILURE")
+  );
+  store.close();
+});
+
 test("frozen resolution replays superseded and retired versions while effective resolution follows dates", () => {
   const store = fixture();
   const resolver = new GovernedDefinitionV2Resolver(store);

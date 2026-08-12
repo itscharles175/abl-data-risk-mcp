@@ -10,6 +10,11 @@ import { TextDecoder } from "node:util";
 
 import type { MonitoringAlertStore } from "../control/alerts.js";
 import type { ArtifactStore } from "../control/artifacts.js";
+import type {
+  GovernedDefinitionAuditEventV2,
+  GovernedDefinitionV2Store,
+  GovernedDefinitionViewV2
+} from "../control/governed-definitions-v2.js";
 import type { InputCertificationViewV1 } from "../control/input-certifications.js";
 import {
   DefinitionStoreError,
@@ -37,6 +42,10 @@ import {
 import type { SnapshotIngestionService } from "../services/ingestion.js";
 import type { SqlSnapshotExtractionService } from "../services/sql-snapshot-extraction.js";
 import type { InputCertificationService } from "../services/input-certification.js";
+import type {
+  GovernedDefinitionV2Resolver,
+  GovernedDefinitionExecutionReferenceV2
+} from "../services/governed-definition-v2-resolver.js";
 import {
   alertListInputSchema,
   alertTransitionInputSchema,
@@ -46,6 +55,12 @@ import {
   definitionProposeInputSchema,
   definitionTransitionInputSchema,
   fileIngestInputSchema,
+  governedDefinitionV2AuditListInputSchema,
+  governedDefinitionV2GetInputSchema,
+  governedDefinitionV2ListInputSchema,
+  governedDefinitionV2ProposeInputSchema,
+  governedDefinitionV2SelectEffectiveInputSchema,
+  governedDefinitionV2TransitionInputSchema,
   mappingProposeInputSchema,
   mappingTransitionInputSchema,
   membershipChangeInputSchema,
@@ -66,6 +81,12 @@ import {
   type DefinitionProposeInput,
   type DefinitionTransitionInput,
   type FileIngestInput,
+  type GovernedDefinitionV2AuditListInput,
+  type GovernedDefinitionV2GetInput,
+  type GovernedDefinitionV2ListInput,
+  type GovernedDefinitionV2ProposeInput,
+  type GovernedDefinitionV2SelectEffectiveInput,
+  type GovernedDefinitionV2TransitionInput,
   type InputArtifactKind,
   type MappingProposeInput,
   type MappingTransitionInput,
@@ -88,6 +109,11 @@ type DefinitionPort = Pick<
   DefinitionStore,
   "get" | "listAuditEvents" | "propose" | "selectEffective" | "transition"
 >;
+type GovernedDefinitionV2Port = Pick<
+  GovernedDefinitionV2Store,
+  "get" | "list" | "listAuditEvents" | "propose" | "selectEffective" | "transition"
+>;
+type GovernedDefinitionV2ResolverPort = Pick<GovernedDefinitionV2Resolver, "resolveEffective">;
 type ArtifactPort = Pick<ArtifactStore, "putJson">;
 type MembershipPort = Pick<TenantMembershipStore, "approve" | "propose" | "revoke">;
 type AlertPort = Pick<MonitoringAlertStore, "listAlerts" | "listAuditEvents" | "transitionAlert">;
@@ -103,6 +129,8 @@ export interface OperatorControlPlaneDependencies {
   readonly principal: OperatorPrincipal;
   readonly control: ControlPort;
   readonly definitions: DefinitionPort;
+  readonly governedDefinitionsV2?: GovernedDefinitionV2Port;
+  readonly governedDefinitionV2Resolver?: GovernedDefinitionV2ResolverPort;
   readonly artifacts: ArtifactPort;
   readonly memberships: MembershipPort;
   readonly alerts: AlertPort;
@@ -188,6 +216,64 @@ export interface OperatorDefinitionSummary {
   readonly effectiveFrom: string;
   readonly effectiveTo: string | null;
   readonly documentHash: string;
+}
+
+export interface OperatorGovernedDefinitionV2Summary {
+  readonly definitionVersionId: string;
+  readonly definitionKey: string;
+  readonly kind: string;
+  readonly semanticVersion: string;
+  readonly status: string;
+  readonly lifecycleRevision: number;
+  readonly effectiveFrom: string;
+  readonly effectiveTo: string | null;
+  readonly predecessorDefinitionVersionId: string | null;
+  readonly rollbackTargetDefinitionVersionId: string | null;
+  readonly proposedBy: string;
+  readonly proposedAt: string;
+  readonly lastTransitionBy: string;
+  readonly lastTransitionAt: string;
+  readonly documentHash: string;
+  readonly semanticDiffHash: string;
+  readonly semanticDiff: {
+    readonly beforeHash: string | null;
+    readonly afterHash: string;
+    readonly changeCount: number;
+    readonly changedPaths: readonly string[];
+    readonly truncated: boolean;
+  };
+  readonly impactPreviewHash: string;
+  readonly impactPreview: {
+    readonly impactLevel: string;
+    readonly affectedCapabilities: readonly string[];
+    readonly changedPathCount: number;
+    readonly rollbackTargetRequired: boolean;
+  };
+  readonly versionHash: string;
+  readonly approval: {
+    readonly approvedBy: string;
+    readonly approvedAt: string;
+    readonly approvalEventHash: string;
+  } | null;
+}
+
+export interface OperatorEffectiveGovernedDefinitionV2Summary
+  extends OperatorGovernedDefinitionV2Summary {
+  readonly resolutionVerified: true;
+  readonly executionReference: GovernedDefinitionExecutionReferenceV2;
+}
+
+export interface OperatorGovernedDefinitionV2AuditSummary {
+  readonly sequence: number;
+  readonly eventId: string;
+  readonly definitionVersionId: string;
+  readonly lifecycleRevision: number;
+  readonly fromStatus: string | null;
+  readonly toStatus: string;
+  readonly actor: string;
+  readonly occurredAt: string;
+  readonly previousEventHash: string | null;
+  readonly eventHash: string;
 }
 
 export interface OperatorCertificationSummary {
@@ -446,6 +532,141 @@ export class OperatorControlPlane {
     return definitionSummary(definition);
   }
 
+  proposeGovernedDefinitionV2(inputValue: unknown): OperatorGovernedDefinitionV2Summary {
+    const input = parseStrict(
+      governedDefinitionV2ProposeInputSchema,
+      inputValue,
+      "governed definition v2 proposal"
+    );
+    const definition = this.#governedDefinitionsV2().propose({
+      tenantId: input.tenantId,
+      definitionVersionId: input.definitionVersionId,
+      definitionKey: input.definitionKey,
+      kind: input.kind,
+      semanticVersion: input.semanticVersion,
+      effectiveFrom: input.effectiveFrom,
+      ...(input.effectiveTo === undefined ? {} : { effectiveTo: input.effectiveTo }),
+      ...(input.predecessorDefinitionVersionId === undefined
+        ? {}
+        : { predecessorDefinitionVersionId: input.predecessorDefinitionVersionId }),
+      ...(input.rollbackTargetDefinitionVersionId === undefined
+        ? {}
+        : { rollbackTargetDefinitionVersionId: input.rollbackTargetDefinitionVersionId }),
+      document: boundedJson(
+        input.document,
+        "governed definition v2 document",
+        1_000_000
+      ),
+      proposedBy: this.#principal.principalId,
+      idempotencyKey: input.idempotencyKey
+    });
+    return governedDefinitionV2Summary(definition);
+  }
+
+  transitionGovernedDefinitionV2(inputValue: unknown): OperatorGovernedDefinitionV2Summary {
+    const input = parseStrict(
+      governedDefinitionV2TransitionInputSchema,
+      inputValue,
+      "governed definition v2 transition"
+    );
+    const definition = this.#governedDefinitionsV2().transition({
+      tenantId: input.tenantId,
+      definitionVersionId: input.definitionVersionId,
+      toStatus: input.toStatus,
+      expectedRevision: input.expectedRevision,
+      actor: this.#principal.principalId,
+      ...(input.evidence === undefined
+        ? {}
+        : {
+            evidence: boundedJson(
+              input.evidence,
+              "governed definition v2 transition evidence",
+              128_000
+            )
+          }),
+      idempotencyKey: input.idempotencyKey
+    });
+    return governedDefinitionV2Summary(definition);
+  }
+
+  getGovernedDefinitionV2(inputValue: unknown): OperatorGovernedDefinitionV2Summary {
+    const input = parseStrict(
+      governedDefinitionV2GetInputSchema,
+      inputValue,
+      "governed definition v2 get request"
+    );
+    const definition = this.#governedDefinitionsV2().get(
+      input.tenantId,
+      input.definitionVersionId
+    );
+    if (definition === undefined) {
+      throw new OperatorControlPlaneError(
+        "DEFINITION_INVALID",
+        "Governed definition v2 version was not found"
+      );
+    }
+    return governedDefinitionV2Summary(definition);
+  }
+
+  listGovernedDefinitionsV2(inputValue: unknown): readonly OperatorGovernedDefinitionV2Summary[] {
+    const input = parseStrict(
+      governedDefinitionV2ListInputSchema,
+      inputValue,
+      "governed definition v2 list request"
+    );
+    return this.#governedDefinitionsV2()
+      .list(input.tenantId, {
+        ...(input.kind === undefined ? {} : { kind: input.kind }),
+        ...(input.definitionKey === undefined ? {} : { definitionKey: input.definitionKey }),
+        ...(input.limit === undefined ? {} : { limit: input.limit })
+      })
+      .map(governedDefinitionV2Summary);
+  }
+
+  selectEffectiveGovernedDefinitionV2(
+    inputValue: unknown
+  ): OperatorEffectiveGovernedDefinitionV2Summary {
+    const input = parseStrict(
+      governedDefinitionV2SelectEffectiveInputSchema,
+      inputValue,
+      "governed definition v2 effective-selection request"
+    );
+    const resolved = this.#governedDefinitionV2Resolver().resolveEffective(input);
+    const definition = this.#governedDefinitionsV2().get(
+      input.tenantId,
+      resolved.reference.definitionVersionId
+    );
+    if (
+      definition === undefined ||
+      definition.version.versionHash !== resolved.reference.versionHash ||
+      definition.version.documentHash !== resolved.reference.documentHash ||
+      definition.approvalEvidence?.approvalEventHash !== resolved.reference.approvalEventHash
+    ) {
+      throw new OperatorControlPlaneError(
+        "DEFINITION_INVALID",
+        "Resolved governed definition v2 metadata failed integrity binding"
+      );
+    }
+    return {
+      ...governedDefinitionV2Summary(definition),
+      resolutionVerified: true,
+      executionReference: resolved.reference
+    };
+  }
+
+  listGovernedDefinitionV2Audit(
+    inputValue: unknown
+  ): readonly OperatorGovernedDefinitionV2AuditSummary[] {
+    const input = parseStrict(
+      governedDefinitionV2AuditListInputSchema,
+      inputValue,
+      "governed definition v2 audit request"
+    );
+    return this.#governedDefinitionsV2()
+      .listAuditEvents(input.tenantId, input.afterSequence ?? 0, input.limit ?? 100)
+      .map(governedDefinitionV2AuditSummary);
+  }
+
   certifySnapshot(inputValue: unknown): OperatorCertificationSummary {
     const input = parseStrict(certifySnapshotInputSchema, inputValue, "snapshot certification");
     const snapshot = this.#dependencies.control.getDatasetSnapshot(input.tenantId, input.snapshotId);
@@ -692,6 +913,28 @@ export class OperatorControlPlane {
     return this.#dependencies.alerts
       .listAuditEvents(input.tenantId, { afterSequence, limit })
       .map((event) => auditSummary(event));
+  }
+
+  #governedDefinitionsV2(): GovernedDefinitionV2Port {
+    const authority = this.#dependencies.governedDefinitionsV2;
+    if (authority === undefined) {
+      throw new OperatorControlPlaneError(
+        "DEFINITION_INVALID",
+        "Governed definition v2 administration is unavailable"
+      );
+    }
+    return authority;
+  }
+
+  #governedDefinitionV2Resolver(): GovernedDefinitionV2ResolverPort {
+    const resolver = this.#dependencies.governedDefinitionV2Resolver;
+    if (resolver === undefined) {
+      throw new OperatorControlPlaneError(
+        "DEFINITION_INVALID",
+        "Governed definition v2 resolution is unavailable"
+      );
+    }
+    return resolver;
   }
 }
 
@@ -947,6 +1190,69 @@ function definitionSummary(definition: GovernedDefinition): OperatorDefinitionSu
   };
 }
 
+function governedDefinitionV2Summary(
+  definition: GovernedDefinitionViewV2
+): OperatorGovernedDefinitionV2Summary {
+  const { version } = definition;
+  return {
+    definitionVersionId: version.definitionVersionId,
+    definitionKey: version.definitionKey,
+    kind: version.kind,
+    semanticVersion: version.semanticVersion,
+    status: definition.status,
+    lifecycleRevision: definition.lifecycleRevision,
+    effectiveFrom: version.effectiveFrom,
+    effectiveTo: version.effectiveTo,
+    predecessorDefinitionVersionId: version.predecessorDefinitionVersionId,
+    rollbackTargetDefinitionVersionId: version.rollbackTargetDefinitionVersionId,
+    proposedBy: version.proposedBy,
+    proposedAt: version.proposedAt,
+    lastTransitionBy: definition.lastTransitionBy,
+    lastTransitionAt: definition.lastTransitionAt,
+    documentHash: version.documentHash,
+    semanticDiffHash: version.semanticDiffHash,
+    semanticDiff: {
+      beforeHash: version.semanticDiff.beforeHash,
+      afterHash: version.semanticDiff.afterHash,
+      changeCount: version.semanticDiff.changeCount,
+      changedPaths: [...version.semanticDiff.changedPaths],
+      truncated: version.semanticDiff.truncated
+    },
+    impactPreviewHash: version.impactPreviewHash,
+    impactPreview: {
+      impactLevel: version.impactPreview.impactLevel,
+      affectedCapabilities: [...version.impactPreview.affectedCapabilities],
+      changedPathCount: version.impactPreview.changedPathCount,
+      rollbackTargetRequired: version.impactPreview.rollbackTargetRequired
+    },
+    versionHash: version.versionHash,
+    approval: definition.approvalEvidence === null
+      ? null
+      : {
+          approvedBy: definition.approvalEvidence.approvedBy,
+          approvedAt: definition.approvalEvidence.approvedAt,
+          approvalEventHash: definition.approvalEvidence.approvalEventHash
+        }
+  };
+}
+
+function governedDefinitionV2AuditSummary(
+  event: GovernedDefinitionAuditEventV2
+): OperatorGovernedDefinitionV2AuditSummary {
+  return {
+    sequence: event.sequence,
+    eventId: event.eventId,
+    definitionVersionId: event.definitionVersionId,
+    lifecycleRevision: event.lifecycleRevision,
+    fromStatus: event.fromStatus,
+    toStatus: event.toStatus,
+    actor: event.actor,
+    occurredAt: event.occurredAt,
+    previousEventHash: event.previousEventHash,
+    eventHash: event.eventHash
+  };
+}
+
 function inputCertificationSummary(
   record: InputCertificationViewV1
 ): OperatorInputCertificationSummary {
@@ -1044,6 +1350,12 @@ export type {
   DefinitionProposeInput,
   DefinitionTransitionInput,
   FileIngestInput,
+  GovernedDefinitionV2AuditListInput,
+  GovernedDefinitionV2GetInput,
+  GovernedDefinitionV2ListInput,
+  GovernedDefinitionV2ProposeInput,
+  GovernedDefinitionV2SelectEffectiveInput,
+  GovernedDefinitionV2TransitionInput,
   MappingProposeInput,
   MappingTransitionInput,
   MembershipChangeInput,

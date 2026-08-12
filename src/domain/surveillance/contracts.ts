@@ -276,7 +276,12 @@ export interface MetricCellLineageV1 {
   readonly methodologyVersion: number;
   readonly methodologyHash: string;
   readonly snapshotHashes: readonly string[];
+  /** Full disclosure/denominator population; retained as populationHash for v1 readers. */
   readonly populationHash: string;
+  /** Records that contributed to the numerator or disclosed amount. */
+  readonly numeratorPopulationHash: string;
+  /** Records against which the cell value or coverage denominator was evaluated. */
+  readonly denominatorPopulationHash: string;
   readonly entityResolutionHash: string | null;
 }
 

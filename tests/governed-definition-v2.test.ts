@@ -6,6 +6,8 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 
 import {
+  GovernedDefinitionStatusV2Schema,
+  GovernedDefinitionTransitionV2Schema,
   ReconciliationDefinitionV1Schema,
   SemanticVersionV2Schema,
   canonicalHash,
@@ -18,11 +20,16 @@ import {
 } from "../src/contracts/index.js";
 import {
   GOVERNED_DEFINITION_V2_STORE_COMPONENT,
+  GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION,
   GovernedDefinitionV2Store,
   GovernedDefinitionV2StoreError,
   type GovernedDefinitionViewV2
 } from "../src/control/governed-definitions-v2.js";
 import { DefinitionStore } from "../src/control/definitions.js";
+import {
+  GovernedDefinitionV2Resolver,
+  GovernedDefinitionV2ResolverError
+} from "../src/services/governed-definition-v2-resolver.js";
 
 const directories: string[] = [];
 const TIMES = [
@@ -176,6 +183,220 @@ test("a rollback target remains active until its pending replacement activates",
   assert.equal(replacement.status, "active");
   assert.equal(store.get("tenant-a", first.version.definitionVersionId)?.status, "superseded");
   assert.equal(retireFirst("after-activation").status, "retired");
+  store.close();
+});
+
+test("withdrawal is terminal, non-executable, and allowed only before activation", () => {
+  assert.equal(GovernedDefinitionStatusV2Schema.safeParse("withdrawn").success, true);
+  assert.equal(GovernedDefinitionTransitionV2Schema.safeParse("withdrawn").success, true);
+
+  for (const sourceStatus of ["proposed", "validated", "approved"] as const) {
+    const { store } = fixture();
+    let current = store.propose(
+      proposal(`metric-withdraw-${sourceStatus}`, "1.0.0", "2026-01-01", 12)
+    );
+    if (sourceStatus !== "proposed") {
+      current = transition(store, current, "validated", "checker-a", `${sourceStatus}-validate`);
+    }
+    if (sourceStatus === "approved") {
+      current = transition(store, current, "approved", "checker-a", "approved-approve");
+    }
+
+    const immutableVersionHash = current.version.versionHash;
+    const withdrawn = store.transition({
+      tenantId: "tenant-a",
+      definitionVersionId: current.version.definitionVersionId,
+      toStatus: "withdrawn",
+      expectedRevision: current.lifecycleRevision,
+      actor: "checker-b",
+      evidence: { reason: `withdraw ${sourceStatus} draft` },
+      idempotencyKey: `${sourceStatus}-withdraw`
+    });
+    assert.equal(withdrawn.status, "withdrawn");
+    assert.equal(withdrawn.lifecycleRevision, current.lifecycleRevision + 1);
+    assert.equal(withdrawn.version.versionHash, immutableVersionHash);
+
+    for (const toStatus of ["validated", "approved", "active", "retired", "withdrawn"] as const) {
+      assert.throws(
+        () =>
+          store.transition({
+            tenantId: "tenant-a",
+            definitionVersionId: current.version.definitionVersionId,
+            toStatus,
+            expectedRevision: withdrawn.lifecycleRevision,
+            actor: "checker-c",
+            idempotencyKey: `${sourceStatus}-after-withdraw-${toStatus}`
+          }),
+        (error: unknown) => storeError(error, "ILLEGAL_TRANSITION")
+      );
+    }
+    assert.throws(
+      () => store.selectEffective("tenant-a", "metric_definition", "roll-rate", "2026-08-12"),
+      (error: unknown) => storeError(error, "NOT_FOUND")
+    );
+    assert.throws(
+      () =>
+        new GovernedDefinitionV2Resolver(store).resolveFrozen({
+          tenantId: "tenant-a",
+          definitionVersionId: current.version.definitionVersionId
+        }),
+      (error: unknown) =>
+        error instanceof GovernedDefinitionV2ResolverError && error.code === "UNAPPROVED"
+    );
+    store.close();
+  }
+
+  const { store } = fixture();
+  const first = activate(
+    store,
+    store.propose(proposal("metric-withdraw-active-v1", "1.0.0", "2026-01-01", 12)),
+    "checker-a",
+    "withdraw-active-v1"
+  );
+  const cannotWithdraw = (version: GovernedDefinitionViewV2, suffix: string) =>
+    store.transition({
+      tenantId: "tenant-a",
+      definitionVersionId: version.version.definitionVersionId,
+      toStatus: "withdrawn",
+      expectedRevision: version.lifecycleRevision,
+      actor: "checker-c",
+      idempotencyKey: `cannot-withdraw-${suffix}`
+    });
+  assert.throws(() => cannotWithdraw(first, "active"), (error: unknown) =>
+    storeError(error, "ILLEGAL_TRANSITION")
+  );
+  const second = activate(
+    store,
+    store.propose({
+      ...proposal("metric-withdraw-active-v2", "2.0.0", "2026-07-01", 18),
+      predecessorDefinitionVersionId: first.version.definitionVersionId,
+      rollbackTargetDefinitionVersionId: first.version.definitionVersionId
+    }),
+    "checker-b",
+    "withdraw-active-v2"
+  );
+  const superseded = store.get("tenant-a", first.version.definitionVersionId)!;
+  assert.equal(superseded.status, "superseded");
+  assert.throws(() => cannotWithdraw(superseded, "superseded"), (error: unknown) =>
+    storeError(error, "ILLEGAL_TRANSITION")
+  );
+  const retired = store.transition({
+    tenantId: "tenant-a",
+    definitionVersionId: superseded.version.definitionVersionId,
+    toStatus: "retired",
+    expectedRevision: superseded.lifecycleRevision,
+    actor: "checker-c",
+    idempotencyKey: "retire-before-withdraw-attempt"
+  });
+  assert.throws(() => cannotWithdraw(retired, "retired"), (error: unknown) =>
+    storeError(error, "ILLEGAL_TRANSITION")
+  );
+  assert.equal(second.status, "active");
+  store.close();
+});
+
+test("withdrawal preserves maker-checker, tenant, revision, replay, and audit guarantees", () => {
+  const { store } = fixture();
+  const proposed = store.propose(proposal("metric-withdraw-governed", "1.0.0", "2026-01-01", 12));
+  const request = {
+    tenantId: "tenant-a",
+    definitionVersionId: proposed.version.definitionVersionId,
+    toStatus: "withdrawn" as const,
+    expectedRevision: proposed.lifecycleRevision,
+    actor: "checker-a",
+    evidence: { reason: "duplicate source delivery" },
+    idempotencyKey: "governed-withdraw"
+  };
+  assert.throws(
+    () => store.transition({ ...request, actor: "maker-a", idempotencyKey: "maker-withdraw" }),
+    (error: unknown) => storeError(error, "MAKER_CHECKER_VIOLATION")
+  );
+  assert.throws(
+    () => store.transition({ ...request, tenantId: "tenant-b", idempotencyKey: "other-tenant" }),
+    (error: unknown) => storeError(error, "NOT_FOUND")
+  );
+  assert.throws(
+    () => store.transition({ ...request, expectedRevision: proposed.lifecycleRevision + 1 }),
+    (error: unknown) => storeError(error, "CONCURRENCY_CONFLICT")
+  );
+
+  const withdrawn = store.transition(request);
+  const eventsBeforeReplay = store.listAuditEvents("tenant-a");
+  const replay = store.transition(request);
+  assert.deepEqual(replay, withdrawn);
+  assert.equal(store.listAuditEvents("tenant-a").length, eventsBeforeReplay.length);
+  assert.throws(
+    () => store.transition({ ...request, evidence: { reason: "changed after receipt" } }),
+    (error: unknown) => storeError(error, "IDEMPOTENCY_CONFLICT")
+  );
+
+  assert.equal(eventsBeforeReplay.at(-1)?.fromStatus, "proposed");
+  assert.equal(eventsBeforeReplay.at(-1)?.toStatus, "withdrawn");
+  for (const [index, event] of eventsBeforeReplay.entries()) {
+    assert.equal(event.previousEventHash, index === 0 ? null : eventsBeforeReplay[index - 1]!.eventHash);
+  }
+  store.close();
+});
+
+test("a withdrawn rollback-dependent successor no longer blocks retirement and remains predecessor history", () => {
+  const { store } = fixture();
+  const first = activate(
+    store,
+    store.propose(proposal("metric-withdraw-history-v1", "1.0.0", "2026-01-01", 12)),
+    "checker-a",
+    "withdraw-history-v1"
+  );
+  let abandoned = store.propose({
+    ...proposal("metric-withdraw-history-v2", "2.0.0", "2026-07-01", 18),
+    predecessorDefinitionVersionId: first.version.definitionVersionId,
+    rollbackTargetDefinitionVersionId: first.version.definitionVersionId
+  });
+  abandoned = transition(store, abandoned, "validated", "checker-b", "withdraw-history-v2-validate");
+  abandoned = transition(store, abandoned, "approved", "checker-b", "withdraw-history-v2-approve");
+  assert.throws(
+    () =>
+      store.transition({
+        tenantId: "tenant-a",
+        definitionVersionId: first.version.definitionVersionId,
+        toStatus: "retired",
+        expectedRevision: first.lifecycleRevision,
+        actor: "checker-c",
+        idempotencyKey: "retire-with-pending-successor"
+      }),
+    (error: unknown) => storeError(error, "CONFLICT")
+  );
+  const withdrawn = store.transition({
+    tenantId: "tenant-a",
+    definitionVersionId: abandoned.version.definitionVersionId,
+    toStatus: "withdrawn",
+    expectedRevision: abandoned.lifecycleRevision,
+    actor: "checker-c",
+    evidence: { reason: "replacement rejected during review" },
+    idempotencyKey: "withdraw-history-v2"
+  });
+  assert.equal(withdrawn.approvalEvidence?.approvalEventHash, abandoned.approvalEvidence?.approvalEventHash);
+  const retired = store.transition({
+    tenantId: "tenant-a",
+    definitionVersionId: first.version.definitionVersionId,
+    toStatus: "retired",
+    expectedRevision: first.lifecycleRevision,
+    actor: "checker-c",
+    idempotencyKey: "retire-after-withdrawal"
+  });
+  assert.equal(retired.status, "retired");
+
+  const successor = store.propose({
+    ...proposal("metric-withdraw-history-v3", "3.0.0", "2027-01-01", 24),
+    predecessorDefinitionVersionId: withdrawn.version.definitionVersionId
+  });
+  assert.equal(successor.version.predecessorDefinitionVersionId, withdrawn.version.definitionVersionId);
+  assert.equal(store.get("tenant-a", withdrawn.version.definitionVersionId)?.status, "withdrawn");
+  const active = activate(store, successor, "checker-d", "withdraw-history-v3");
+  assert.equal(
+    store.selectEffective("tenant-a", "metric_definition", "roll-rate", "2027-01-01").version
+      .definitionVersionId,
+    active.version.definitionVersionId
+  );
   store.close();
 });
 
@@ -719,7 +940,7 @@ test("v2 component coexists with v1 rows and attests immutable schema on reopen"
   assert.equal((database.prepare("SELECT COUNT(*) AS count FROM governed_definition_v2_versions").get() as { count: number }).count, 1);
   assert.equal(
     (database.prepare("SELECT schema_version FROM component_schema_versions WHERE component_name = ?").get(GOVERNED_DEFINITION_V2_STORE_COMPONENT) as { schema_version: number }).schema_version,
-    1
+    GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION
   );
   assert.throws(
     () => database.prepare("UPDATE governed_definition_v2_versions SET document_json = '{}' ").run(),
@@ -727,6 +948,120 @@ test("v2 component coexists with v1 rows and attests immutable schema on reopen"
   );
   database.close();
 });
+
+test("the shipped schema-v1 event history migrates atomically before withdrawal is used", () => {
+  const directory = mkdtempSync(join(tmpdir(), "abl-governed-definition-v2-migration-"));
+  directories.push(directory);
+  const databasePath = join(directory, "control.sqlite");
+  let clockIndex = 0;
+  const clock = () => new Date(TIMES[clockIndex++] ?? "2026-08-12T13:00:00.000Z");
+  const initial = new GovernedDefinitionV2Store(databasePath, { clock });
+  const proposed = initial.propose(proposal("metric-migrate-v1", "1.0.0", "2026-01-01", 12));
+  const validated = transition(initial, proposed, "validated", "checker-a", "migrate-v1-validate");
+  const approved = transition(initial, validated, "approved", "checker-a", "migrate-v1-approve");
+  const before = initial.listAuditEvents("tenant-a");
+  initial.close();
+
+  downgradeGovernedDefinitionEventsToShippedV1(databasePath);
+  const sequenceDatabase = new DatabaseSync(databasePath);
+  const sequenceUpdate = sequenceDatabase
+    .prepare("UPDATE sqlite_sequence SET seq = 40 WHERE name = 'governed_definition_v2_events'")
+    .run();
+  assert.equal(sequenceUpdate.changes, 1);
+  sequenceDatabase.close();
+
+  const migrated = new GovernedDefinitionV2Store(databasePath, { clock });
+  assert.deepEqual(migrated.listAuditEvents("tenant-a"), before);
+  const withdrawn = migrated.transition({
+    tenantId: "tenant-a",
+    definitionVersionId: approved.version.definitionVersionId,
+    toStatus: "withdrawn",
+    expectedRevision: approved.lifecycleRevision,
+    actor: "checker-b",
+    evidence: { reason: "abandoned after migration" },
+    idempotencyKey: "migrate-v1-withdraw"
+  });
+  assert.equal(withdrawn.status, "withdrawn");
+  assert.equal(migrated.listAuditEvents("tenant-a").at(-1)?.sequence, 41);
+  migrated.close();
+
+  const database = new DatabaseSync(databasePath);
+  assert.equal(
+    (database.prepare("SELECT schema_version FROM component_schema_versions WHERE component_name = ?").get(GOVERNED_DEFINITION_V2_STORE_COMPONENT) as { schema_version: number }).schema_version,
+    GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION
+  );
+  const eventSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'governed_definition_v2_events'").get() as { sql: string }).sql;
+  assert.match(eventSql, /'withdrawn'/);
+  assert.equal(
+    (database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'governed_definition_v2_events'").get() as { seq: number }).seq,
+    41
+  );
+  assert.throws(
+    () => database.prepare("UPDATE governed_definition_v2_events SET actor = 'tamper'").run(),
+    /append-only/
+  );
+  database.close();
+});
+
+function downgradeGovernedDefinitionEventsToShippedV1(databasePath: string): void {
+  const database = new DatabaseSync(databasePath);
+  database.exec(`
+    PRAGMA foreign_keys = ON;
+    BEGIN IMMEDIATE;
+    DROP TRIGGER governed_definition_v2_events_no_update;
+    DROP TRIGGER governed_definition_v2_events_no_delete;
+    DROP INDEX governed_definition_v2_events_tenant_sequence;
+    ALTER TABLE governed_definition_v2_events RENAME TO governed_definition_v2_events_v2;
+    CREATE TABLE governed_definition_v2_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      tenant_id TEXT NOT NULL,
+      event_id TEXT NOT NULL UNIQUE,
+      definition_version_id TEXT NOT NULL,
+      lifecycle_revision INTEGER NOT NULL CHECK (lifecycle_revision > 0),
+      from_status TEXT CHECK (from_status IS NULL OR from_status IN (
+        'proposed','validated','approved','active','superseded','retired'
+      )),
+      to_status TEXT NOT NULL CHECK (to_status IN (
+        'proposed','validated','approved','active','superseded','retired'
+      )),
+      actor TEXT NOT NULL,
+      evidence_json TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      previous_event_hash TEXT CHECK (
+        previous_event_hash IS NULL OR
+        (previous_event_hash GLOB 'sha256:[0-9a-f]*' AND length(previous_event_hash) = 71)
+      ),
+      event_hash TEXT NOT NULL CHECK (event_hash GLOB 'sha256:[0-9a-f]*' AND length(event_hash) = 71),
+      UNIQUE (tenant_id, definition_version_id, lifecycle_revision),
+      FOREIGN KEY (tenant_id, definition_version_id)
+        REFERENCES governed_definition_v2_versions (tenant_id, definition_version_id)
+    ) STRICT;
+    INSERT INTO governed_definition_v2_events (
+      sequence, tenant_id, event_id, definition_version_id, lifecycle_revision,
+      from_status, to_status, actor, evidence_json, occurred_at,
+      previous_event_hash, event_hash
+    )
+    SELECT sequence, tenant_id, event_id, definition_version_id, lifecycle_revision,
+           from_status, to_status, actor, evidence_json, occurred_at,
+           previous_event_hash, event_hash
+      FROM governed_definition_v2_events_v2
+     ORDER BY sequence;
+    DROP TABLE governed_definition_v2_events_v2;
+    CREATE INDEX governed_definition_v2_events_tenant_sequence
+      ON governed_definition_v2_events (tenant_id, sequence);
+    CREATE TRIGGER governed_definition_v2_events_no_update
+    BEFORE UPDATE ON governed_definition_v2_events
+    BEGIN SELECT RAISE(ABORT, 'governed definition v2 events are append-only'); END;
+    CREATE TRIGGER governed_definition_v2_events_no_delete
+    BEFORE DELETE ON governed_definition_v2_events
+    BEGIN SELECT RAISE(ABORT, 'governed definition v2 events are append-only'); END;
+    UPDATE component_schema_versions
+       SET schema_version = 1
+     WHERE component_name = '${GOVERNED_DEFINITION_V2_STORE_COMPONENT}';
+    COMMIT;
+  `);
+  database.close();
+}
 
 function fixture(): { store: GovernedDefinitionV2Store } {
   const directory = mkdtempSync(join(tmpdir(), "abl-governed-definition-v2-"));

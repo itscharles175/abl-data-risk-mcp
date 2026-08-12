@@ -1,5 +1,10 @@
 import * as z from "zod/v4";
 
+import {
+  GovernedDefinitionKindV2Schema,
+  GovernedDefinitionTransitionV2Schema,
+  SemanticVersionV2Schema
+} from "../contracts/index.js";
 import type { JsonValue } from "../control/store.js";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/;
@@ -144,6 +149,66 @@ export const definitionTransitionInputSchema = z
     toStatus: z.enum(["validated", "approved", "active", "retired"]),
     evidence: z.unknown().optional(),
     idempotencyKey: documentIdentifierSchema
+  })
+  .strict();
+
+export const governedDefinitionV2ProposeInputSchema = z
+  .object({
+    tenantId: operatorIdentifierSchema,
+    definitionVersionId: operatorIdentifierSchema,
+    definitionKey: operatorIdentifierSchema,
+    kind: GovernedDefinitionKindV2Schema,
+    semanticVersion: SemanticVersionV2Schema,
+    effectiveFrom: isoDateSchema,
+    effectiveTo: isoDateSchema.optional(),
+    predecessorDefinitionVersionId: operatorIdentifierSchema.optional(),
+    rollbackTargetDefinitionVersionId: operatorIdentifierSchema.optional(),
+    document: z.unknown(),
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+export const governedDefinitionV2TransitionInputSchema = z
+  .object({
+    tenantId: operatorIdentifierSchema,
+    definitionVersionId: operatorIdentifierSchema,
+    toStatus: GovernedDefinitionTransitionV2Schema,
+    expectedRevision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    evidence: z.unknown().optional(),
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+export const governedDefinitionV2GetInputSchema = z
+  .object({
+    tenantId: operatorIdentifierSchema,
+    definitionVersionId: operatorIdentifierSchema
+  })
+  .strict();
+
+export const governedDefinitionV2ListInputSchema = z
+  .object({
+    tenantId: operatorIdentifierSchema,
+    kind: GovernedDefinitionKindV2Schema.optional(),
+    definitionKey: operatorIdentifierSchema.optional(),
+    limit: z.number().int().min(1).max(1_000).optional()
+  })
+  .strict();
+
+export const governedDefinitionV2SelectEffectiveInputSchema = z
+  .object({
+    tenantId: operatorIdentifierSchema,
+    kind: GovernedDefinitionKindV2Schema,
+    definitionKey: operatorIdentifierSchema,
+    asOfDate: isoDateSchema
+  })
+  .strict();
+
+export const governedDefinitionV2AuditListInputSchema = z
+  .object({
+    tenantId: operatorIdentifierSchema,
+    afterSequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+    limit: z.number().int().min(1).max(1_000).optional()
   })
   .strict();
 
@@ -532,6 +597,16 @@ export type MappingProposeInput = z.infer<typeof mappingProposeInputSchema>;
 export type MappingTransitionInput = z.infer<typeof mappingTransitionInputSchema>;
 export type DefinitionProposeInput = z.infer<typeof definitionProposeInputSchema>;
 export type DefinitionTransitionInput = z.infer<typeof definitionTransitionInputSchema>;
+export type GovernedDefinitionV2ProposeInput = z.infer<typeof governedDefinitionV2ProposeInputSchema>;
+export type GovernedDefinitionV2TransitionInput = z.infer<typeof governedDefinitionV2TransitionInputSchema>;
+export type GovernedDefinitionV2GetInput = z.infer<typeof governedDefinitionV2GetInputSchema>;
+export type GovernedDefinitionV2ListInput = z.infer<typeof governedDefinitionV2ListInputSchema>;
+export type GovernedDefinitionV2SelectEffectiveInput = z.infer<
+  typeof governedDefinitionV2SelectEffectiveInputSchema
+>;
+export type GovernedDefinitionV2AuditListInput = z.infer<
+  typeof governedDefinitionV2AuditListInputSchema
+>;
 export type CertifySnapshotInput = z.infer<typeof certifySnapshotInputSchema>;
 export type PutInputArtifactInput = z.infer<typeof putInputArtifactInputSchema>;
 export type InputCertificationProposeRequest = z.infer<typeof inputCertificationProposeSchema>;

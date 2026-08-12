@@ -8,6 +8,7 @@ import { loadConfig, type SourceConfig } from "../config.js";
 import { MonitoringAlertStore } from "../control/alerts.js";
 import { ArtifactStore } from "../control/artifacts.js";
 import { DefinitionStore } from "../control/definitions.js";
+import { GovernedDefinitionV2Store } from "../control/governed-definitions-v2.js";
 import { InputCertificationStore } from "../control/input-certifications.js";
 import { ControlStore } from "../control/store.js";
 import { isRestrictedColumn, tableKey } from "../infrastructure/sql/types.js";
@@ -15,6 +16,7 @@ import { loadRuntimeConfiguration, type RuntimeEnvironment } from "../runtime/co
 import { TenantMembershipStore } from "../security/membership-store.js";
 import { SnapshotIngestionService } from "../services/ingestion.js";
 import { InputCertificationService } from "../services/input-certification.js";
+import { GovernedDefinitionV2Resolver } from "../services/governed-definition-v2-resolver.js";
 import { TrustedPostgresSnapshotSource } from "../services/postgres-snapshot-source.js";
 import {
   SqlSnapshotExtractionService,
@@ -179,6 +181,7 @@ export function createOperatorRuntime(
 
   let control: ControlStore | undefined;
   let definitions: DefinitionStore | undefined;
+  let governedDefinitionsV2: GovernedDefinitionV2Store | undefined;
   let alerts: MonitoringAlertStore | undefined;
   let memberships: TenantMembershipStore | undefined;
   let inputCertifications: InputCertificationStore | undefined;
@@ -187,6 +190,12 @@ export function createOperatorRuntime(
     const sqlPolicies = loadSqlPolicies(environment.ABL_OPERATOR_SQL_POLICIES_FILE);
     const controlStore = control = new ControlStore(runtime.storage.controlDatabasePath);
     const definitionStore = definitions = new DefinitionStore(runtime.storage.controlDatabasePath);
+    const governedDefinitionV2Store = governedDefinitionsV2 = new GovernedDefinitionV2Store(
+      runtime.storage.controlDatabasePath
+    );
+    const governedDefinitionV2Resolver = new GovernedDefinitionV2Resolver(
+      governedDefinitionV2Store
+    );
     const alertStore = alerts = new MonitoringAlertStore(runtime.storage.controlDatabasePath);
     const membershipStore = memberships = new TenantMembershipStore(runtime.storage.controlDatabasePath);
     const inputCertificationStore = inputCertifications = new InputCertificationStore(
@@ -210,6 +219,8 @@ export function createOperatorRuntime(
       principal,
       control: controlStore,
       definitions: definitionStore,
+      governedDefinitionsV2: governedDefinitionV2Store,
+      governedDefinitionV2Resolver,
       artifacts,
       memberships: membershipStore,
       alerts: alertStore,
@@ -231,6 +242,7 @@ export function createOperatorRuntime(
           membershipStore.close();
           inputCertificationStore.close();
           alertStore.close();
+          governedDefinitionV2Store.close();
           definitionStore.close();
           controlStore.close();
           releaseArtifactKeys();
@@ -241,6 +253,7 @@ export function createOperatorRuntime(
     memberships?.close();
     inputCertifications?.close();
     alerts?.close();
+    governedDefinitionsV2?.close();
     definitions?.close();
     control?.close();
     releaseArtifactKeys();

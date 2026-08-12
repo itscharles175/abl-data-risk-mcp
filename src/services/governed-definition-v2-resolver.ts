@@ -170,14 +170,13 @@ export class GovernedDefinitionV2Resolver {
     if (version.tenantId !== tenantId) {
       integrity("Governed definition resolution crossed a tenant boundary");
     }
+    const approval = this.#verifyLifecycle(tenantId, version, view);
     if (!allowedStatuses.includes(view.status)) {
       throw new GovernedDefinitionV2ResolverError(
         "UNAPPROVED",
         `Governed definition status ${String(view.status)} is not executable in this resolution mode`
       );
     }
-
-    const approval = this.#verifyLifecycle(tenantId, version, view);
     const executionDocument = projectExecutionDocument(version, approval);
     const reference = immutable({
       definitionVersionId: version.definitionVersionId,
@@ -237,7 +236,7 @@ export class GovernedDefinitionV2Resolver {
       }
       if (
         event.actor === version.proposedBy &&
-        ["validated", "approved", "active", "retired"].includes(event.toStatus)
+        ["validated", "approved", "active", "retired", "withdrawn"].includes(event.toStatus)
       ) {
         integrity("Governed definition maker cannot perform a checker lifecycle transition");
       }
@@ -451,9 +450,9 @@ function isLegalTransition(
 ): boolean {
   if (fromStatus === null) return toStatus === "proposed";
   return (
-    (fromStatus === "proposed" && toStatus === "validated") ||
-    (fromStatus === "validated" && toStatus === "approved") ||
-    (fromStatus === "approved" && toStatus === "active") ||
+    (fromStatus === "proposed" && (toStatus === "validated" || toStatus === "withdrawn")) ||
+    (fromStatus === "validated" && (toStatus === "approved" || toStatus === "withdrawn")) ||
+    (fromStatus === "approved" && (toStatus === "active" || toStatus === "withdrawn")) ||
     (fromStatus === "active" && (toStatus === "superseded" || toStatus === "retired")) ||
     (fromStatus === "superseded" && toStatus === "retired")
   );

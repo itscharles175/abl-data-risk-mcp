@@ -12,6 +12,12 @@ export const OPERATOR_COMMANDS = [
   "mapping-transition",
   "definition-propose",
   "definition-transition",
+  "definition-v2-propose",
+  "definition-v2-transition",
+  "definition-v2-get",
+  "definition-v2-list",
+  "definition-v2-select-effective",
+  "definition-v2-audit-list",
   "certify-snapshot",
   "put-input-artifact",
   "input-certification-propose",
@@ -31,18 +37,24 @@ type OperatorControlPlanePort = Pick<
   | "approveMembership"
   | "certifySnapshot"
   | "extractSqlSnapshot"
+  | "getGovernedDefinitionV2"
   | "ingestLoanTape"
   | "listAlerts"
   | "listAudit"
+  | "listGovernedDefinitionV2Audit"
+  | "listGovernedDefinitionsV2"
   | "proposeDefinition"
+  | "proposeGovernedDefinitionV2"
   | "proposeMapping"
   | "proposeMembership"
   | "putInputArtifact"
   | "proposeInputCertification"
   | "certifyInputCertification"
   | "revokeMembership"
+  | "selectEffectiveGovernedDefinitionV2"
   | "transitionAlert"
   | "transitionDefinition"
+  | "transitionGovernedDefinitionV2"
   | "transitionMapping"
 >;
 
@@ -140,6 +152,18 @@ async function executeCommand(
       return controlPlane.proposeDefinition(request);
     case "definition-transition":
       return controlPlane.transitionDefinition(request);
+    case "definition-v2-propose":
+      return controlPlane.proposeGovernedDefinitionV2(request);
+    case "definition-v2-transition":
+      return controlPlane.transitionGovernedDefinitionV2(request);
+    case "definition-v2-get":
+      return controlPlane.getGovernedDefinitionV2(request);
+    case "definition-v2-list":
+      return controlPlane.listGovernedDefinitionsV2(request);
+    case "definition-v2-select-effective":
+      return controlPlane.selectEffectiveGovernedDefinitionV2(request);
+    case "definition-v2-audit-list":
+      return controlPlane.listGovernedDefinitionV2Audit(request);
     case "certify-snapshot":
       return controlPlane.certifySnapshot(request);
     case "put-input-artifact":

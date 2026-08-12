@@ -58,7 +58,6 @@ interface ExecutionContext {
   readonly methodologyId: string;
   readonly methodologyVersion: number;
   readonly methodologyHash: string;
-  readonly maxCells: number;
 }
 
 interface RawCell {
@@ -70,7 +69,7 @@ interface RawCell {
   readonly value: Decimal | null;
   readonly observedCount: number;
   readonly eligibleCount: number;
-  readonly privacyCount: number;
+  readonly numeratorPopulationTokens?: readonly string[];
   readonly populationTokens: readonly string[];
   readonly snapshotHashes: readonly string[];
   readonly entityResolutionHash: string | null;
@@ -96,12 +95,15 @@ export function runPortfolioSurveillance(
     (left, right) =>
       compareText(left.definitionId, right.definitionId) || left.version - right.version
   );
-  const metrics = definitions.map((definition) => executeMetric(context, definition));
-  const totalCellCount = metrics.reduce((total, metric) => total + metric.cells.length, 0);
-  if (totalCellCount > input.bounds.maxCells) {
-    throw new Error(
-      `Surveillance pack produced ${totalCellCount} cells, exceeding execution maxCells ${input.bounds.maxCells}`
-    );
+  const metrics: SurveillanceMetricResultV1[] = [];
+  let remainingCells = input.bounds.maxCells;
+  for (const definition of definitions) {
+    if (remainingCells === 0) {
+      throw new Error(`Surveillance pack exhausted execution maxCells ${input.bounds.maxCells}`);
+    }
+    const metric = executeMetric(context, definition, remainingCells);
+    metrics.push(metric);
+    remainingCells -= metric.cells.length;
   }
   const asOfDates = context.snapshots.map(({ snapshot }) => snapshot.asOfDate);
   const snapshotHashes = context.snapshots.map(({ snapshot }) => snapshot.snapshotHash);
@@ -213,8 +215,7 @@ function prepareContext(input: PortfolioSurveillanceInputV1): ExecutionContext {
     entityResolutions,
     methodologyId: input.methodology.methodologyId,
     methodologyVersion: input.methodology.methodologyVersion,
-    methodologyHash: input.methodology.methodologyHash,
-    maxCells: input.bounds.maxCells
+    methodologyHash: input.methodology.methodologyHash
   };
 }
 
@@ -230,6 +231,9 @@ function validateSnapshot(snapshot: CertifiedSurveillanceSnapshotV1, tenantId: s
   identifier(snapshot.certification.certificationId, "certificationId");
   validateHash(snapshot.certification.certificationHash, "certificationHash");
   isoTimestamp(snapshot.certification.certifiedAt, "certifiedAt");
+  if (snapshot.asOfDate > snapshot.certification.certifiedAt.slice(0, 10)) {
+    throw new Error("Snapshot as-of date cannot be after its certification timestamp");
+  }
 }
 
 function prepareRecords(
@@ -264,7 +268,8 @@ function prepareRecords(
 
 function executeMetric(
   context: ExecutionContext,
-  definition: MetricDefinitionV1
+  definition: MetricDefinitionV1,
+  remainingCells: number
 ): SurveillanceMetricResultV1 {
   const snapshots = context.snapshots.slice(-definition.window.maximumPeriods).map((snapshot) => ({
     snapshot: snapshot.snapshot,
@@ -279,9 +284,9 @@ function executeMetric(
       `Metric ${definition.definitionId} produced ${rawCells.length} cells, exceeding definition maximumCells ${definition.maximumCells}`
     );
   }
-  if (rawCells.length > context.maxCells) {
+  if (rawCells.length > remainingCells) {
     throw new Error(
-      `Metric ${definition.definitionId} produced ${rawCells.length} cells, exceeding execution maxCells ${context.maxCells}`
+      `Metric ${definition.definitionId} produced ${rawCells.length} cells, exceeding remaining execution cell budget ${remainingCells}`
     );
   }
   const definitionHash = stableFingerprint(definition);
@@ -420,8 +425,8 @@ function calculateRollCure(
           value: reason === "available" ? safeRatio(transition.amount, denominator.amount) : null,
           observedCount: denominator.observed,
           eligibleCount: denominator.eligible,
-          privacyCount: transition.count,
-          populationTokens: [...transition.tokens].sort(compareText),
+          numeratorPopulationTokens: [...transition.tokens].sort(compareText),
+          populationTokens: [...denominator.tokens].sort(compareText),
           snapshotHashes: [previous.snapshot.snapshotHash, current.snapshot.snapshotHash],
           entityResolutionHash: null,
           availabilityReason: reason,
@@ -465,8 +470,8 @@ function calculateDefaultEver(
       let numerator = zero();
       let eligible = 0;
       let observed = 0;
-      let eventCount = 0;
       const eventTokens = new Set<string>();
+      const observedTokens = new Set<string>();
       for (const start of prior.records) {
         const startDefault = optionalBoolean(start.record[config.defaultFlagField], config.defaultFlagField);
         const startBalance = configuredDecimal(start.record[config.balanceField], config.balanceField, definition.nullPolicy);
@@ -476,11 +481,11 @@ function calculateDefaultEver(
         const endDefault = end ? optionalBoolean(end.record[config.defaultFlagField], config.defaultFlagField) : null;
         if (startDefault === null || startBalance === null || !end || endDefault === null) continue;
         observed += 1;
+        observedTokens.add(start.populationToken);
         const weight = config.incidenceBasis === "count" ? one() : startBalance;
         denominator = denominator.plus(weight);
         if (endDefault) {
           numerator = numerator.plus(weight);
-          eventCount += 1;
           eventTokens.add(start.populationToken);
         }
       }
@@ -498,8 +503,8 @@ function calculateDefaultEver(
         value: reason === "available" ? safeRatio(numerator, denominator) : null,
         observedCount: observed,
         eligibleCount: eligible,
-        privacyCount: eventCount,
-        populationTokens: [...eventTokens].sort(compareText),
+        numeratorPopulationTokens: [...eventTokens].sort(compareText),
+        populationTokens: [...observedTokens].sort(compareText),
         snapshotHashes: [prior.snapshot.snapshotHash, current.snapshot.snapshotHash],
         entityResolutionHash: null,
         availabilityReason: reason,
@@ -512,8 +517,8 @@ function calculateDefaultEver(
       let numerator = zero();
       let eligible = 0;
       let observed = 0;
-      let eventCount = 0;
       const eventTokens = new Set<string>();
+      const observedTokens = new Set<string>();
       for (const currentRecord of current.records) {
         eligible += 1;
         const balance = configuredDecimal(currentRecord.record[config.balanceField], config.balanceField, definition.nullPolicy);
@@ -521,11 +526,11 @@ function calculateDefaultEver(
         const dpdValues = observations.map((item) => optionalInteger(item.record[config.daysPastDueField], config.daysPastDueField));
         if (balance === null || dpdValues.some((value) => value === null)) continue;
         observed += 1;
+        observedTokens.add(currentRecord.populationToken);
         const weight = config.incidenceBasis === "count" ? one() : balance;
         denominator = denominator.plus(weight);
         if (dpdValues.some((value) => value !== null && value >= threshold)) {
           numerator = numerator.plus(weight);
-          eventCount += 1;
           eventTokens.add(currentRecord.populationToken);
         }
       }
@@ -543,8 +548,8 @@ function calculateDefaultEver(
         value: reason === "available" ? safeRatio(numerator, denominator) : null,
         observedCount: observed,
         eligibleCount: eligible,
-        privacyCount: eventCount,
-        populationTokens: [...eventTokens].sort(compareText),
+        numeratorPopulationTokens: [...eventTokens].sort(compareText),
+        populationTokens: [...observedTokens].sort(compareText),
         snapshotHashes: context.snapshots
           .filter(({ snapshot }) => snapshot.asOfDate <= current.snapshot.asOfDate)
           .map(({ snapshot }) => snapshot.snapshotHash),
@@ -582,6 +587,9 @@ function calculateLossRecovery(
     const grossTokens = new Set<string>();
     const recoveryTokens = new Set<string>();
     const lagTokens = new Set<string>();
+    const grossContributorTokens = new Set<string>();
+    const lossContributorTokens = new Set<string>();
+    const recoveryContributorTokens = new Set<string>();
     for (const record of current.records) {
       const currentGross = configuredDecimal(
         record.record[config.grossLossField],
@@ -620,17 +628,22 @@ function calculateLossRecovery(
           grossDenominator = grossDenominator.plus(exposure);
           grossObserved += 1;
           grossTokens.add(record.populationToken);
+          if (!periodGross.isZero()) grossContributorTokens.add(record.populationToken);
         }
       }
       if (periodRecovery !== null) {
         recoveries = recoveries.plus(periodRecovery);
         recoveryObserved += 1;
         recoveryTokens.add(record.populationToken);
+        if (!periodRecovery.isZero()) recoveryContributorTokens.add(record.populationToken);
       }
       if (periodGross !== null && periodRecovery !== null && exposure !== null) {
         denominator = denominator.plus(exposure);
         lossObserved += 1;
         lossTokens.add(record.populationToken);
+        if (!periodGross.minus(periodRecovery).isZero()) {
+          lossContributorTokens.add(record.populationToken);
+        }
       }
       if (periodRecovery !== null && periodRecovery.greaterThan(0)) {
         recoveryEventCount += 1;
@@ -669,7 +682,7 @@ function calculateLossRecovery(
         value: grossReason === "available" ? safeRatio(gross, grossDenominator) : null,
         observedCount: grossObserved,
         eligibleCount: eligible,
-        privacyCount: grossTokens.size,
+        numeratorPopulationTokens: [...grossContributorTokens],
         populationTokens: [...grossTokens],
         snapshotHashes: [current.snapshot.snapshotHash],
         availabilityReason: grossReason,
@@ -684,7 +697,7 @@ function calculateLossRecovery(
         value: lossReason === "available" ? safeRatio(gross.minus(recoveries), denominator) : null,
         observedCount: lossObserved,
         eligibleCount: eligible,
-        privacyCount: lossTokens.size,
+        numeratorPopulationTokens: [...lossContributorTokens],
         populationTokens: [...lossTokens],
         snapshotHashes: [current.snapshot.snapshotHash],
         availabilityReason: lossReason,
@@ -699,7 +712,7 @@ function calculateLossRecovery(
         value: recoveryReason === "available" ? recoveries : null,
         observedCount: recoveryObserved,
         eligibleCount: eligible,
-        privacyCount: recoveryTokens.size,
+        numeratorPopulationTokens: [...recoveryContributorTokens],
         populationTokens: [...recoveryTokens],
         snapshotHashes: [current.snapshot.snapshotHash],
         availabilityReason: recoveryReason,
@@ -714,7 +727,7 @@ function calculateLossRecovery(
         value: lagReason === "available" ? safeRatio(lagNumerator, lagDenominator) : null,
         observedCount: lagObserved,
         eligibleCount: recoveryEventCount,
-        privacyCount: lagTokens.size,
+        numeratorPopulationTokens: [...lagTokens],
         populationTokens: [...lagTokens],
         snapshotHashes: [current.snapshot.snapshotHash],
         availabilityReason: lagReason,
@@ -747,10 +760,10 @@ function calculatePaydownPrepayment(
     let eligible = 0;
     let paydownObserved = 0;
     let prepaymentObserved = 0;
-    let paydownEvents = 0;
-    let prepaymentEvents = 0;
     const paydownTokens = new Set<string>();
     const prepaymentTokens = new Set<string>();
+    const paydownObservedTokens = new Set<string>();
+    const prepaymentObservedTokens = new Set<string>();
     for (const start of previous.records) {
       eligible += 1;
       const end = currentByLoan.get(start.recordKey);
@@ -760,11 +773,11 @@ function calculatePaydownPrepayment(
         : zero();
       if (startBalance === null || endBalance === null) continue;
       paydownObserved += 1;
+      paydownObservedTokens.add(start.populationToken);
       denominator = denominator.plus(startBalance);
       const decline = Decimal.max(startBalance.minus(endBalance), zero());
       paydown = paydown.plus(decline);
       if (decline.greaterThan(0)) {
-        paydownEvents += 1;
         paydownTokens.add(start.populationToken);
       }
       if (config.scheduledPrincipalField !== undefined && end) {
@@ -775,10 +788,10 @@ function calculatePaydownPrepayment(
         );
         if (scheduled !== null) {
           prepaymentObserved += 1;
+          prepaymentObservedTokens.add(start.populationToken);
           const excess = Decimal.max(decline.minus(scheduled), zero());
           prepayment = prepayment.plus(excess);
           if (excess.greaterThan(0)) {
-            prepaymentEvents += 1;
             prepaymentTokens.add(start.populationToken);
           }
         }
@@ -803,8 +816,8 @@ function calculatePaydownPrepayment(
         value: paydownReason === "available" ? safeRatio(paydown, denominator) : null,
         observedCount: paydownObserved,
         eligibleCount: eligible,
-        privacyCount: paydownEvents,
-        populationTokens: [...paydownTokens],
+        numeratorPopulationTokens: [...paydownTokens],
+        populationTokens: [...paydownObservedTokens],
         snapshotHashes: [previous.snapshot.snapshotHash, current.snapshot.snapshotHash],
         availabilityReason: paydownReason,
         suppressionGroup: stableJson([previous.snapshot.asOfDate, current.snapshot.asOfDate, "cashflow"])
@@ -818,8 +831,8 @@ function calculatePaydownPrepayment(
         value: prepaymentReason === "available" ? safeRatio(prepayment, denominator) : null,
         observedCount: prepaymentObserved,
         eligibleCount: eligible,
-        privacyCount: prepaymentEvents,
-        populationTokens: [...prepaymentTokens],
+        numeratorPopulationTokens: [...prepaymentTokens],
+        populationTokens: [...prepaymentObservedTokens],
         snapshotHashes: [previous.snapshot.snapshotHash, current.snapshot.snapshotHash],
         availabilityReason: prepaymentReason,
         suppressionGroup: stableJson([previous.snapshot.asOfDate, current.snapshot.asOfDate, "cashflow"])
@@ -842,13 +855,21 @@ function calculateRatingMigration(
   for (const [previous, current] of adjacentPairs(context.snapshots)) {
     const currentByLoan = byLoan(current.records);
     const categories = new Set<string>();
-    const denominators = new Map<string, { amount: Decimal; eligible: number; observed: number }>();
+    const denominators = new Map<
+      string,
+      { amount: Decimal; eligible: number; observed: number; tokens: Set<string> }
+    >();
     const transitions = new Map<string, MutableAmountGroup>();
     for (const start of previous.records) {
       const from = optionalCategory(start.record[config.ratingField], config.ratingField);
       if (from !== null) categories.add(from);
       if (from === null) continue;
-      const denominator = denominators.get(from) ?? { amount: zero(), eligible: 0, observed: 0 };
+      const denominator = denominators.get(from) ?? {
+        amount: zero(),
+        eligible: 0,
+        observed: 0,
+        tokens: new Set<string>()
+      };
       denominator.eligible += 1;
       const end = currentByLoan.get(start.recordKey);
       const to = end ? optionalCategory(end.record[config.ratingField], config.ratingField) : null;
@@ -857,6 +878,7 @@ function calculateRatingMigration(
       if (end && to !== null && balance !== null) {
         denominator.amount = denominator.amount.plus(balance);
         denominator.observed += 1;
+        denominator.tokens.add(start.populationToken);
         const key = stableJson([from, to]);
         const transition = transitions.get(key) ?? { amount: zero(), count: 0, tokens: new Set<string>() };
         transition.amount = transition.amount.plus(balance);
@@ -868,7 +890,12 @@ function calculateRatingMigration(
     }
     const orderedCategories = [...categories].sort(compareText);
     for (const from of orderedCategories) {
-      const denominator = denominators.get(from) ?? { amount: zero(), eligible: 0, observed: 0 };
+      const denominator = denominators.get(from) ?? {
+        amount: zero(),
+        eligible: 0,
+        observed: 0,
+        tokens: new Set<string>()
+      };
       for (const to of orderedCategories) {
         const transition = transitions.get(stableJson([from, to])) ?? {
           amount: zero(),
@@ -891,8 +918,8 @@ function calculateRatingMigration(
             value: reason === "available" ? safeRatio(transition.amount, denominator.amount) : null,
             observedCount: denominator.observed,
             eligibleCount: denominator.eligible,
-            privacyCount: transition.count,
-            populationTokens: [...transition.tokens],
+            numeratorPopulationTokens: [...transition.tokens],
+            populationTokens: [...denominator.tokens],
             snapshotHashes: [previous.snapshot.snapshotHash, current.snapshot.snapshotHash],
             availabilityReason: reason,
             suppressionGroup: stableJson([previous.snapshot.asOfDate, current.snapshot.asOfDate, from])
@@ -967,7 +994,6 @@ function calculateBalanceUtilization(
         dimensions,
         observedCount: observed,
         eligibleCount: eligible,
-        privacyCount: observed,
         populationTokens: [...tokens],
         snapshotHashes: [current.snapshot.snapshotHash],
         suppressionGroup: stableJson([current.snapshot.asOfDate, "balance"])
@@ -1024,6 +1050,7 @@ function calculateMaturityWall(
     );
     let denominator = zero();
     let observed = 0;
+    const denominatorTokens = new Set<string>();
     for (const record of current.records) {
       const maturityDate = optionalDate(record.record[config.maturityDateField], config.maturityDateField);
       const balance = configuredDecimal(record.record[config.balanceField], config.balanceField, definition.nullPolicy);
@@ -1040,6 +1067,7 @@ function calculateMaturityWall(
       group.tokens.add(record.populationToken);
       denominator = denominator.plus(balance);
       observed += 1;
+      denominatorTokens.add(record.populationToken);
     }
     const eligible = current.records.length;
     const reason = baseAvailability(definition, observed, eligible, denominator, true);
@@ -1055,8 +1083,8 @@ function calculateMaturityWall(
           value: reason === "available" ? safeRatio(group.amount, denominator) : null,
           observedCount: observed,
           eligibleCount: eligible,
-          privacyCount: group.count,
-          populationTokens: [...group.tokens],
+          numeratorPopulationTokens: [...group.tokens],
+          populationTokens: [...denominatorTokens],
           snapshotHashes: [current.snapshot.snapshotHash],
           availabilityReason: reason,
           suppressionGroup: stableJson([current.snapshot.asOfDate, "maturity"])
@@ -1113,10 +1141,12 @@ function calculateConcentration(
     const groups = new Map<string, MutableAmountGroup>();
     let denominator = zero();
     let observed = 0;
+    const denominatorTokens = new Set<string>();
     for (const record of current.records) {
       const balance = configuredDecimal(record.record[config.balanceField], config.balanceField, definition.nullPolicy);
       const category = concentrationCategory(
         record,
+        context.tenantId,
         config.dimensionField,
         bins,
         resolutionMap,
@@ -1130,6 +1160,7 @@ function calculateConcentration(
       groups.set(category, group);
       denominator = denominator.plus(balance);
       observed += 1;
+      denominatorTokens.add(record.populationToken);
     }
     const ordered = [...groups.entries()].sort(
       ([leftKey, left], [rightKey, right]) =>
@@ -1163,8 +1194,8 @@ function calculateConcentration(
           value: reason === "available" ? safeRatio(group.amount, denominator) : null,
           observedCount: observed,
           eligibleCount: eligible,
-          privacyCount: group.count,
-          populationTokens: [...group.tokens],
+          numeratorPopulationTokens: [...group.tokens],
+          populationTokens: [...denominatorTokens],
           snapshotHashes: [current.snapshot.snapshotHash],
           entityResolutionHash: resolutionHash,
           availabilityReason: reason,
@@ -1188,8 +1219,8 @@ function calculateConcentration(
         value: hhi,
         observedCount: observed,
         eligibleCount: eligible,
-        privacyCount: observed,
-        populationTokens: current.records.map(({ populationToken }) => populationToken),
+        numeratorPopulationTokens: [...denominatorTokens],
+        populationTokens: [...denominatorTokens],
         snapshotHashes: [current.snapshot.snapshotHash],
         entityResolutionHash: resolutionHash,
         availabilityReason: reason,
@@ -1257,6 +1288,10 @@ function calculatePeriodComparison(
         }
       }
       const populationTokens = [...new Set([...start.values(), ...end.values()].map(({ token }) => token))].sort(compareText);
+      const startPopulationTokens = [...new Set([...start.values()].map(({ token }) => token))].sort(compareText);
+      const changedPopulationTokens = [
+        ...new Set([...drivers.values()].flatMap(({ tokens }) => [...tokens]))
+      ].sort(compareText);
       const eligible = Math.max(start.size, end.size);
       const observed = populationTokens.length;
       const change = endTotal.minus(startTotal);
@@ -1277,7 +1312,7 @@ function calculatePeriodComparison(
           value: amountReason === "available" ? change : null,
           observedCount: observed,
           eligibleCount: eligible,
-          privacyCount: observed,
+          numeratorPopulationTokens: changedPopulationTokens,
           populationTokens,
           snapshotHashes: [previous.snapshot.snapshotHash, current.snapshot.snapshotHash],
           availabilityReason: amountReason,
@@ -1292,8 +1327,8 @@ function calculatePeriodComparison(
           value: rateReason === "available" ? safeRatio(change, startTotal) : null,
           observedCount: observed,
           eligibleCount: eligible,
-          privacyCount: observed,
-          populationTokens,
+          numeratorPopulationTokens: changedPopulationTokens,
+          populationTokens: startPopulationTokens,
           snapshotHashes: [previous.snapshot.snapshotHash, current.snapshot.snapshotHash],
           availabilityReason: rateReason,
           suppressionGroup: stableJson([previous.snapshot.asOfDate, current.snapshot.asOfDate, category, "change"])
@@ -1310,8 +1345,8 @@ function calculatePeriodComparison(
             value: amountReason === "available" ? group.amount : null,
             observedCount: observed,
             eligibleCount: eligible,
-            privacyCount: group.count,
-            populationTokens: [...group.tokens],
+            numeratorPopulationTokens: [...group.tokens],
+            populationTokens,
             snapshotHashes: [previous.snapshot.snapshotHash, current.snapshot.snapshotHash],
             availabilityReason: amountReason,
             suppressionGroup: stableJson([previous.snapshot.asOfDate, current.snapshot.asOfDate, category, "drivers"])
@@ -1325,8 +1360,8 @@ function calculatePeriodComparison(
             value: rateReason === "available" ? safeRatio(group.amount, startTotal) : null,
             observedCount: observed,
             eligibleCount: eligible,
-            privacyCount: group.count,
-            populationTokens: [...group.tokens],
+            numeratorPopulationTokens: [...group.tokens],
+            populationTokens: startPopulationTokens,
             snapshotHashes: [previous.snapshot.snapshotHash, current.snapshot.snapshotHash],
             availabilityReason: rateReason,
             suppressionGroup: stableJson([previous.snapshot.asOfDate, current.snapshot.asOfDate, category, "driver-shares"])
@@ -1350,8 +1385,26 @@ function finalizeCells(
 ): readonly MetricCellV1[] {
   const ordered = [...rawCells].sort(compareRawCells);
   const suppressed = new Set<number>();
-  for (const [index, cell] of ordered.entries()) {
-    if (cell.privacyCount > 0 && cell.privacyCount < definition.privacy.minimumCellCount) {
+  const privacyPopulations = ordered.map((cell) => {
+    const numeratorTokens = [...new Set(cell.numeratorPopulationTokens ?? cell.populationTokens)].sort(compareText);
+    const denominatorTokens = [...new Set(cell.populationTokens)].sort(compareText);
+    const numeratorSet = new Set(numeratorTokens);
+    const complementCount = denominatorTokens.reduce(
+      (count, token) => count + (numeratorSet.has(token) ? 0 : 1),
+      0
+    );
+    return { numeratorTokens, denominatorTokens, complementCount };
+  });
+  for (const [index] of ordered.entries()) {
+    const population = privacyPopulations[index]!;
+    const minimum = definition.privacy.minimumCellCount;
+    const numeratorCount = population.numeratorTokens.length;
+    const denominatorCount = population.denominatorTokens.length;
+    if (
+      (denominatorCount > 0 && denominatorCount < minimum) ||
+      (numeratorCount > 0 && numeratorCount < minimum) ||
+      (population.complementCount > 0 && population.complementCount < minimum)
+    ) {
       suppressed.add(index);
     }
   }
@@ -1366,10 +1419,14 @@ function finalizeCells(
       const directlySuppressed = indexes.filter((index) => suppressed.has(index));
       if (directlySuppressed.length !== 1 || indexes.length < 2) continue;
       const complement = indexes
-        .filter((index) => !suppressed.has(index) && ordered[index]!.privacyCount > 0)
+        .filter(
+          (index) =>
+            !suppressed.has(index) && privacyPopulations[index]!.numeratorTokens.length > 0
+        )
         .sort(
           (left, right) =>
-            ordered[left]!.privacyCount - ordered[right]!.privacyCount ||
+            privacyPopulations[left]!.numeratorTokens.length -
+              privacyPopulations[right]!.numeratorTokens.length ||
             compareRawCells(ordered[left]!, ordered[right]!)
         )[0];
       if (complement !== undefined) suppressed.add(complement);
@@ -1392,12 +1449,17 @@ function finalizeCells(
     }
     if (suppressed.has(index)) reason = "suppressed";
     const available = reason === "available";
-    const populationTokens = [...new Set(cell.populationTokens)].sort(compareText);
+    const { numeratorTokens, denominatorTokens } = privacyPopulations[index]!;
     const snapshotHashes = [...new Set(cell.snapshotHashes)];
-    const populationHash = stableFingerprint({
+    const numeratorPopulationHash = stableFingerprint({
       schemaVersion: "1",
       tenantId,
-      populationTokens
+      populationTokens: numeratorTokens
+    });
+    const denominatorPopulationHash = stableFingerprint({
+      schemaVersion: "1",
+      tenantId,
+      populationTokens: denominatorTokens
     });
     return {
       cellId: stableFingerprint({
@@ -1428,7 +1490,9 @@ function finalizeCells(
         methodologyVersion,
         methodologyHash,
         snapshotHashes,
-        populationHash,
+        populationHash: denominatorPopulationHash,
+        numeratorPopulationHash,
+        denominatorPopulationHash,
         entityResolutionHash: cell.entityResolutionHash
       }
     } satisfies MetricCellV1;
@@ -1440,6 +1504,9 @@ function rawCell(
 ): RawCell {
   return {
     ...cell,
+    numeratorPopulationTokens: [
+      ...new Set(cell.numeratorPopulationTokens ?? cell.populationTokens)
+    ].sort(compareText),
     populationTokens: [...new Set(cell.populationTokens)].sort(compareText),
     snapshotHashes: [...new Set(cell.snapshotHashes)],
     entityResolutionHash: cell.entityResolutionHash ?? null
@@ -1462,7 +1529,7 @@ function unavailableCell(
     value: null,
     observedCount: 0,
     eligibleCount: snapshots.reduce((total, snapshot) => total + snapshot.records.length, 0),
-    privacyCount: 0,
+    numeratorPopulationTokens: [],
     populationTokens: snapshots.flatMap(({ records }) => records.map(({ populationToken }) => populationToken)),
     snapshotHashes: snapshots.map(({ snapshot }) => snapshot.snapshotHash),
     availabilityReason: reason,
@@ -1530,6 +1597,7 @@ function baseAvailability(
 
 function concentrationCategory(
   prepared: PreparedRecord,
+  tenantId: string,
   fieldName: string,
   bins: { readonly definition: BinDefinitionV1; readonly parsed: readonly ValidatedNumericBinV1[] } | undefined,
   resolutionMap: ReadonlyMap<string, string> | undefined,
@@ -1543,6 +1611,7 @@ function concentrationCategory(
   const canonicalEntityId = resolutionMap?.get(stableJson([sourceSystem, sourceEntityId]));
   const opaque = stableFingerprint([
     "resolved-entity-v1",
+    tenantId,
     canonicalEntityId === undefined ? "unresolved" : "resolved",
     canonicalEntityId ?? sourceSystem,
     canonicalEntityId ?? sourceEntityId

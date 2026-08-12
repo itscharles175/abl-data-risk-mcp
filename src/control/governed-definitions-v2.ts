@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   GovernedDefinitionKindV2Schema,
+  GovernedDefinitionTransitionV2Schema,
   IdentifierSchema,
   IsoDateSchema,
   SemanticVersionV2Schema,
@@ -18,24 +19,21 @@ import {
   validateGovernedDefinitionDocumentV2,
   type CanonicalJsonValue,
   type GovernedDefinitionKindV2,
+  type GovernedDefinitionStatusV2,
+  type GovernedDefinitionTransitionV2,
   type GovernedDefinitionVersionV2,
   type SemanticDiffV1,
   type Sha256Hash
 } from "../contracts/index.js";
 import { migrateSqliteComponent } from "../infrastructure/sqlite-component-schema.js";
 
+export type {
+  GovernedDefinitionStatusV2,
+  GovernedDefinitionTransitionV2
+} from "../contracts/index.js";
+
 export const GOVERNED_DEFINITION_V2_STORE_COMPONENT = "abl.governed-definition-v2-store" as const;
-export const GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION = 1 as const;
-
-export type GovernedDefinitionStatusV2 =
-  | "proposed"
-  | "validated"
-  | "approved"
-  | "active"
-  | "superseded"
-  | "retired";
-
-export type GovernedDefinitionTransitionV2 = "validated" | "approved" | "active" | "retired";
+export const GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION = 2 as const;
 
 export interface ProposeGovernedDefinitionV2Input {
   readonly tenantId: string;
@@ -140,7 +138,10 @@ export class GovernedDefinitionV2Store {
       migrateSqliteComponent(this.#database, {
         componentName: GOVERNED_DEFINITION_V2_STORE_COMPONENT,
         supportedVersion: GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION,
-        migrations: [{ version: 1, sql: GOVERNED_DEFINITION_V2_SCHEMA }],
+        migrations: [
+          { version: 1, sql: GOVERNED_DEFINITION_V2_SCHEMA_V1 },
+          { version: 2, sql: GOVERNED_DEFINITION_V2_MIGRATION_V2 }
+        ],
         unsupportedVersionError: (current, supported) =>
           new GovernedDefinitionV2StoreError(
             "CONFLICT",
@@ -291,14 +292,15 @@ export class GovernedDefinitionV2Store {
       if (current.version.proposedBy === input.actor) {
         throw new GovernedDefinitionV2StoreError(
           "MAKER_CHECKER_VIOLATION",
-          "A governed definition proposer cannot validate, approve, activate, or retire that version"
+          "A governed definition proposer cannot validate, approve, activate, retire, or withdraw that version"
         );
       }
       const expected: Record<GovernedDefinitionTransitionV2, readonly GovernedDefinitionStatusV2[]> = {
         validated: ["proposed"],
         approved: ["validated"],
         active: ["approved"],
-        retired: ["active", "superseded"]
+        retired: ["active", "superseded"],
+        withdrawn: ["proposed", "validated", "approved"]
       };
       if (!expected[input.toStatus].includes(current.status)) {
         transition(`Cannot transition ${current.status} definition to ${input.toStatus}`);
@@ -771,7 +773,9 @@ SELECT version.*,
    AND approval.lifecycle_revision <= ?3
  WHERE version.tenant_id = ?1 AND version.definition_version_id = ?2`;
 
-const GOVERNED_DEFINITION_V2_SCHEMA = `
+// This is the exact schema shipped at repository checkpoint 17ad8b1. Never
+// rewrite it: registered version-1 databases must attest before migrating.
+const GOVERNED_DEFINITION_V2_SCHEMA_V1 = `
 CREATE TABLE governed_definition_v2_versions (
   tenant_id TEXT NOT NULL,
   definition_version_id TEXT NOT NULL,
@@ -864,6 +868,73 @@ BEGIN SELECT RAISE(ABORT, 'governed definition v2 idempotency is immutable'); EN
 CREATE TRIGGER governed_definition_v2_idempotency_no_delete
 BEFORE DELETE ON governed_definition_v2_idempotency
 BEGIN SELECT RAISE(ABORT, 'governed definition v2 idempotency is immutable'); END;
+`;
+
+// SQLite cannot widen a CHECK constraint in place. Rebuild only the append-only
+// event table, preserving sequence numbers and hashes byte-for-byte, then
+// recreate its canonical index and immutability triggers in the same migration
+// transaction owned by migrateSqliteComponent.
+const GOVERNED_DEFINITION_V2_MIGRATION_V2 = `
+DROP TRIGGER governed_definition_v2_events_no_update;
+DROP TRIGGER governed_definition_v2_events_no_delete;
+DROP INDEX governed_definition_v2_events_tenant_sequence;
+ALTER TABLE governed_definition_v2_events RENAME TO governed_definition_v2_events_v1;
+
+CREATE TABLE governed_definition_v2_events (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id TEXT NOT NULL,
+  event_id TEXT NOT NULL UNIQUE,
+  definition_version_id TEXT NOT NULL,
+  lifecycle_revision INTEGER NOT NULL CHECK (lifecycle_revision > 0),
+  from_status TEXT CHECK (from_status IS NULL OR from_status IN (
+    'proposed','validated','approved','active','superseded','retired','withdrawn'
+  )),
+  to_status TEXT NOT NULL CHECK (to_status IN (
+    'proposed','validated','approved','active','superseded','retired','withdrawn'
+  )),
+  actor TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  previous_event_hash TEXT CHECK (
+    previous_event_hash IS NULL OR
+    (previous_event_hash GLOB 'sha256:[0-9a-f]*' AND length(previous_event_hash) = 71)
+  ),
+  event_hash TEXT NOT NULL CHECK (event_hash GLOB 'sha256:[0-9a-f]*' AND length(event_hash) = 71),
+  UNIQUE (tenant_id, definition_version_id, lifecycle_revision),
+  FOREIGN KEY (tenant_id, definition_version_id)
+    REFERENCES governed_definition_v2_versions (tenant_id, definition_version_id)
+) STRICT;
+INSERT INTO governed_definition_v2_events (
+  sequence, tenant_id, event_id, definition_version_id, lifecycle_revision,
+  from_status, to_status, actor, evidence_json, occurred_at,
+  previous_event_hash, event_hash
+)
+SELECT sequence, tenant_id, event_id, definition_version_id, lifecycle_revision,
+       from_status, to_status, actor, evidence_json, occurred_at,
+       previous_event_hash, event_hash
+  FROM governed_definition_v2_events_v1
+ ORDER BY sequence;
+UPDATE sqlite_sequence
+   SET seq = MAX(
+     seq,
+     COALESCE(
+       (SELECT prior.seq
+          FROM sqlite_sequence AS prior
+         WHERE prior.name = 'governed_definition_v2_events_v1'),
+       seq
+     )
+   )
+ WHERE name = 'governed_definition_v2_events';
+DROP TABLE governed_definition_v2_events_v1;
+
+CREATE INDEX governed_definition_v2_events_tenant_sequence
+  ON governed_definition_v2_events (tenant_id, sequence);
+CREATE TRIGGER governed_definition_v2_events_no_update
+BEFORE UPDATE ON governed_definition_v2_events
+BEGIN SELECT RAISE(ABORT, 'governed definition v2 events are append-only'); END;
+CREATE TRIGGER governed_definition_v2_events_no_delete
+BEFORE DELETE ON governed_definition_v2_events
+BEGIN SELECT RAISE(ABORT, 'governed definition v2 events are append-only'); END;
 `;
 
 interface GovernedDefinitionVersionRow {
@@ -1041,7 +1112,7 @@ function validateTransition(
   );
   id(input.tenantId, "tenantId");
   id(input.definitionVersionId, "definitionVersionId");
-  if (!["validated", "approved", "active", "retired"].includes(input.toStatus)) {
+  if (!GovernedDefinitionTransitionV2Schema.safeParse(input.toStatus).success) {
     invalid("Governed definition transition is invalid");
   }
   integer(input.expectedRevision, "expectedRevision", 1, Number.MAX_SAFE_INTEGER);

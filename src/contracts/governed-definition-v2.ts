@@ -48,6 +48,28 @@ export const GovernedDefinitionKindV2Schema = z.enum([
 
 export type GovernedDefinitionKindV2 = z.infer<typeof GovernedDefinitionKindV2Schema>;
 
+export const GovernedDefinitionStatusV2Schema = z.enum([
+  "proposed",
+  "validated",
+  "approved",
+  "active",
+  "superseded",
+  "retired",
+  "withdrawn"
+]);
+
+export type GovernedDefinitionStatusV2 = z.infer<typeof GovernedDefinitionStatusV2Schema>;
+
+export const GovernedDefinitionTransitionV2Schema = z.enum([
+  "validated",
+  "approved",
+  "active",
+  "retired",
+  "withdrawn"
+]);
+
+export type GovernedDefinitionTransitionV2 = z.infer<typeof GovernedDefinitionTransitionV2Schema>;
+
 export const SemanticVersionV2Schema = z
   .string()
   .max(64)
