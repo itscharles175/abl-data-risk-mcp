@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **SQLProject** (13763 symbols, 32042 relationships, 252 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **abl-data-risk-mcp** (13765 symbols, 32044 relationships, 252 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -26,9 +26,20 @@ This project is indexed by GitNexus as **SQLProject** (13763 symbols, 32042 rela
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/SQLProject/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/SQLProject/clusters` | All functional areas |
-| `gitnexus://repo/SQLProject/processes` | All execution flows |
-| `gitnexus://repo/SQLProject/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/abl-data-risk-mcp/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/abl-data-risk-mcp/clusters` | All functional areas |
+| `gitnexus://repo/abl-data-risk-mcp/processes` | All execution flows |
+| `gitnexus://repo/abl-data-risk-mcp/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
