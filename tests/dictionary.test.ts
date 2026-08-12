@@ -7,9 +7,18 @@ import {
   getCanonicalField,
   listCanonicalFields,
 } from "../src/domain/dictionary.js";
+import { CANONICAL_DICTIONARY_HASH } from "../src/domain/dictionary-fingerprint.js";
+import {
+  CANONICAL_FIELD_POLICIES,
+  FIELD_POLICY_VERSION,
+  getCanonicalFieldPolicy,
+} from "../src/domain/field-policy.js";
 
 test("dictionary exposes unique, complete, stable field metadata", () => {
   assert.match(DICTIONARY_VERSION, /^\d+\.\d+\.\d+$/);
+  assert.match(CANONICAL_DICTIONARY_HASH, /^[a-f0-9]{64}$/);
+  assert.match(FIELD_POLICY_VERSION, /^\d+\.\d+\.\d+$/);
+  assert.equal(CANONICAL_FIELD_POLICIES.length, CANONICAL_FIELDS.length);
   assert.ok(CANONICAL_FIELDS.length >= 40, "expected a useful loan and ABL field set");
 
   const ids = new Set<string>();
@@ -26,6 +35,14 @@ test("dictionary exposes unique, complete, stable field metadata", () => {
     assert.ok(field.unit.length > 0);
     assert.ok(field.semanticNotes.length > 0);
   }
+});
+
+test("field policy covers every canonical field and defaults unknown fields to restricted", () => {
+  assert.equal(getCanonicalFieldPolicy("loan_id").directIdentifier, true);
+  assert.equal(getCanonicalFieldPolicy("loan_id").aggregationEligibility, "denied");
+  assert.equal(getCanonicalFieldPolicy("outstanding_balance").aggregationEligibility, "allowed");
+  assert.equal(getCanonicalFieldPolicy("not_in_dictionary").defaultMask, "redact");
+  assert.equal(getCanonicalFieldPolicy("not_in_dictionary").exportRequiresExplicitPolicy, true);
 });
 
 test("canonical lookup is exact and returns undefined for unknown ids", () => {

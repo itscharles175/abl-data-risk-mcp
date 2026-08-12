@@ -14,6 +14,21 @@ The defensible product is not natural-language SQL. It is the combination of:
 
 The LLM is valuable at the edges: it interprets user intent, proposes mappings, explains breaks, compares periods, and drafts narratives. It is not the calculator, policy engine, entitlement system, or source of truth.
 
+## Implementation status
+
+This blueprint is the product/domain north star, not a list of unimplemented ideas. The repository now implements the governed technical foundation:
+
+- authenticated remote Streamable HTTP MCP plus a separate local STDIO compatibility surface;
+- encrypted immutable delivered/normalized/result artifacts and immutable lineage manifests;
+- maker/checker mappings, governed definitions, and OAuth tenant memberships;
+- DQ and exact control-total certification, including longitudinal `loan_history` through-cutoff semantics;
+- durable, signed, replay-protected, principal-bound analysis jobs;
+- exact snapshot stratification, vintage, AR borrowing-base, monitoring, alert deduplication, and case transitions;
+- bounded CSV/JSON/NDJSON and allowlisted SQLite/PostgreSQL snapshot extraction;
+- operator CLI and hardened deployment templates.
+
+Implementation is not the same as external certification. A real portfolio/credit agreement, live PostgreSQL environment, IdP/TLS edge, deployed infrastructure, restore exercise, external scheduler/notification service, authenticated remote-client acceptance, and Claude Desktop acceptance remain outstanding. Real Codex CLI tool use and Claude Code connection health are complete. The durable schema below also includes future entities—inventory, documents, covenants, scenarios, notifications, and broader party resolution—that are not all present in code. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the exact boundary and [ROADMAP.md](./ROADMAP.md) for remaining delivery gates.
+
 ## Clarifying “ABL”
 
 The initial idea spans two related but different domains:
@@ -25,7 +40,7 @@ The platform should share ingestion, mapping, governance, lineage, and analytica
 
 ## Initial wedge
 
-Start with a generic longitudinal loan-tape analyzer, then add an accounts-receivable-first borrowing-base engine.
+The implemented sequence began with a generic longitudinal loan-tape analyzer and then added an accounts-receivable-first borrowing-base engine. The product rollout should still certify them in that order on real data.
 
 This sequence works because the loan-tape foundation proves the cross-cutting platform primitives—source introspection, canonical mappings, immutable snapshots, reconciliation, saved analyses, and lineage—while AR creates immediate ABL value through aging, cross-aging, concentration, dilution, collections, and eligibility.
 
@@ -157,6 +172,8 @@ External standards such as FIBO or MISMO can inform terminology and relationship
 
 ## Mapping workflow
 
+Current implementation persists immutable mapping versions, deterministic validation evidence, and the maker/checker lifecycle `proposed -> validated -> approved -> active`, with atomic supersession of the previous active version. The richer transformation AST, distribution profiling, and continuous drift monitoring described below remain expansion work.
+
 Mapping is a controlled lifecycle:
 
 1. Profile the source and infer whether its grain is facility, loan snapshot, event, invoice, inventory item, or a mixed/duplicated export.
@@ -168,11 +185,13 @@ Mapping is a controlled lifecycle:
 7. Reconcile source totals to canonical totals before certification.
 8. Version the mapping and continuously monitor schema, category, null, unit, sparsity, and distribution drift.
 
-Useful mapping states are `exact`, `renamed`, `derived`, `composite`, `defaulted`, `unmapped`, and `ignored`. Operational status is separate: `proposed → validated → approved → active → retired`. Confidence is evidence, not approval.
+Useful future transformation classifications are `exact`, `renamed`, `derived`, `composite`, `defaulted`, `unmapped`, and `ignored`. The implemented operational status is separate: `proposed → validated → approved → active`, after which a replacement version marks the old version `superseded`. Confidence is evidence, not approval.
 
 The transformation language should support only governed operations such as rename, cast, date parse, scale/unit conversion, code map, coalesce, conditional logic, approved split/combine, and approved joins. It should not accept generated JavaScript, Python, or unrestricted SQL.
 
 ## Stratification design
+
+Current implementation performs this design over encrypted normalized canonical records, with exact decimals, explicit bucket validation/order, deterministic hashes, record/group bounds, restricted-field rejection, and primary plus complementary suppression. Currency/FX conversion and a broad saved recipe catalog remain institution-owned extensions.
 
 Every stratification request must state:
 
@@ -216,6 +235,8 @@ Every output should have a totals row, an `Unknown/Unmapped` bucket, and a recon
 
 ## Vintage and cohort design
 
+Current implementation fixes origination cohorts and original-balance denominators, chooses deterministic latest monthly observations, enforces record/point limits, and returns `null` for unseasoned or globally unavailable metrics. Roll rates, cures, prepayment curves, and ABL-specific invoice/inventory cohorts remain future metric packs.
+
 A single point-in-time tape can produce an age distribution. It cannot produce a defensible performance curve unless lifetime event fields carry enough history. True vintages, roll rates, cures, paydowns, and losses usually require repeated snapshots or an event ledger.
 
 Retain original origination and acquisition cohorts after modification, and add separate modification/restructure cohorts. For revolvers, add close, renewal, and first-draw cohorts.
@@ -250,6 +271,8 @@ roll_rate_i_to_j = count_or_balance_moving_i_to_j / starting_count_or_balance_in
 Use `null`, not zero, for unseasoned cells. Fix cohort membership at inception to avoid survivorship bias, and compare vintages at common seasoning horizons.
 
 ## Borrowing-base engine
+
+Current implementation provides an exact AR waterfall for effective-dated record eligibility, cross-aging, debtor concentration, advance rate, component sublimit, reserves, commitment, defined usage, excess availability, and overadvance. It records reason-coded before/after steps in the governed result. Agreement extraction, multi-collateral/inventory rules, covenants, waivers/overrides, submitted-versus-system variance workflows, and scenario orchestration remain pilot/domain expansion work.
 
 Model a borrowing base as an ordered, effective-dated rule graph. Ordering matters economically and legally.
 
@@ -292,6 +315,8 @@ Maintain distinct values for `borrower_reported`, `system_reperformed`, and `app
 
 ## Data quality and reconciliation
 
+Current implementation persists immutable DQ findings and exact row-count/balance/currency reconciliation during snapshot certification. Profiles cover required fields, grain uniqueness, exact decimals, non-negative values, dates/order, allowed codes, null limits, status/DPD consistency, freshness, and currency. Point-in-time populations use exact dates; `loan_history` defaults to a through-cutoff population and blocks future rows or a missing cutoff observation. The full GL/BBC/lockbox reconciliation ladder below remains a source-specific rollout goal.
+
 Build a reconciliation ladder:
 
 1. delivery hash/control totals;
@@ -323,7 +348,7 @@ Severity should reflect dollars, availability, covenant headroom, and affected d
 
 ## Automation model
 
-MCP is the interaction contract, not the scheduler. An external orchestrator—workflow engine, data platform, or approved scheduled agent—runs the pipeline:
+MCP is the interaction contract, not the scheduler. The repository includes a durable queue, fenced worker leases, signed-plan replay protection, encrypted results, manifests, and durable monitoring cases. An external orchestrator—workflow engine, data platform, or approved scheduled agent—still detects deliveries/watermarks and invokes the pipeline:
 
 1. detect delivery or watermark;
 2. ingest idempotently and hash the payload;
@@ -335,10 +360,12 @@ MCP is the interaction contract, not the scheduler. An external orchestrator—w
 8. compare against prior, policy, plan, and historical baseline;
 9. persist artifacts and lineage;
 10. create deduplicated alerts/cases;
-11. dispatch only approved, minimized notifications;
+11. ask a separate approved dispatcher to send minimized notifications;
 12. track acknowledgement, resolution, and SLA.
 
 If a critical quality or reconciliation gate fails, monitoring must stop and report “data not fit for publication.” It must never silently emit a risk signal from incomplete data.
+
+The implemented workflow enforces that gate from the certification manifest rather than a caller-provided claim. Recurring schedules and outbound delivery are not in this process.
 
 ## KPI framework
 
@@ -396,6 +423,8 @@ If a critical quality or reconciliation gate fails, monitoring must stop and rep
 Avoid one opaque “data quality score.” Show failing dimensions, materiality, affected analyses, and blocking status.
 
 ## Alert framework
+
+Current implementation persists typed monitoring runs, immutable occurrences, stable deduplication evidence, recurrence, and reviewable case transitions (`open`, `acknowledged`, `escalated`, `resolved`, `suppressed`, with recurrence reopening where appropriate). Notification dispatch, recipient directories, SLA timers, and the broader catalog below remain external or future work.
 
 Threshold precedence should be:
 
@@ -471,6 +500,8 @@ Alerts should carry affected dollars, rule/metric definition, baseline, evidence
 - No internet-facing local server with embedded master credentials.
 - No source-system writes in the initial product.
 - No assertion that “all databases” are certified; adapters graduate through dialect-specific golden tests.
+- No claim that deployment templates prove a live cloud deployment or that fake-pool PostgreSQL tests prove a live role/database configuration.
+- No claim that every LLM supports MCP; compatibility depends on the host/client transport and protocol implementation.
 
 ## Decisions still needed
 
@@ -482,7 +513,7 @@ Alerts should carry affected dollars, rule/metric definition, baseline, evidence
 - Required tenant/data isolation tier.
 - Which client workflows need raw detail, and which can remain aggregate-only.
 - Whether Postgres is the first certified warehouse or whether Snowflake/SQL Server has higher buyer value.
-- Exact approval model for mappings, policy versions, overrides, alerts, and exports.
+- Institution-specific role assignments and approval policy for mappings, definitions, memberships, overrides, alerts, and exports; the code-level maker/checker mechanism is implemented.
 
 ## Reference anchors
 

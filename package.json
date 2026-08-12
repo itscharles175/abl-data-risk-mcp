@@ -5,14 +5,18 @@
   "description": "A model-agnostic MCP server for governed ABL and loan-tape analytics.",
   "type": "module",
   "bin": {
-    "abl-mcp": "dist/cli.js"
+    "abl-mcp": "dist/cli.js",
+    "abl-operator": "dist/operator/main.js",
+    "abl-mcp-remote": "dist/remote-cli.js"
   },
   "scripts": {
     "audit:prod": "pnpm audit --prod",
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "dev": "tsx src/cli.ts",
+    "operator": "node dist/operator/main.js",
     "start": "node dist/cli.js",
+    "start:remote": "node dist/remote-cli.js",
     "test": "tsx --test tests/**/*.test.ts",
     "verify": "pnpm run check && pnpm run test && pnpm run build"
   },
@@ -25,6 +29,7 @@
     "@modelcontextprotocol/server": "2.0.0",
     "decimal.js": "10.6.0",
     "express": "5.2.1",
+    "jose": "6.2.8",
     "pg": "8.23.0",
     "zod": "4.4.3"
   },

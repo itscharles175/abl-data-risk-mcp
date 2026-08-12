@@ -1,0 +1,199 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: abl-mcp
+  namespace: abl-mcp
+  labels:
+    app.kubernetes.io/name: abl-mcp
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 300
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: abl-mcp
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: abl-mcp
+        app.kubernetes.io/component: server
+    spec:
+      serviceAccountName: abl-mcp
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-runtime-secrets
+          image: ghcr.io/replace-me/abl-mcp-server@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args: ["/app/scripts/container-entrypoint.mjs", "prepare-secrets"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+              ephemeral-storage: 8Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: projected-secrets
+              mountPath: /run/projected-secrets
+              readOnly: true
+            - name: prepared-secrets
+              mountPath: /run/runtime-secrets
+      containers:
+        - name: server
+          image: ghcr.io/replace-me/abl-mcp-server@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args: ["/app/scripts/container-entrypoint.mjs", "serve-remote"]
+          env:
+            - name: ABL_MCP_CONFIG
+              value: /run/config/abl.json
+            - name: ABL_MCP_HOST
+              value: 0.0.0.0
+            - name: ABL_MCP_PORT
+              value: "3333"
+            - name: ABL_AUTH_MODE
+              value: oauth
+            - name: ABL_OAUTH_MAX_TOKEN_LENGTH
+              value: "16384"
+            - name: ABL_MCP_CONTROL_DB_PATH
+              value: /var/lib/abl/control/control.sqlite3
+            - name: ABL_MCP_JOB_DB_PATH
+              value: /var/lib/abl/control/jobs.sqlite3
+            - name: ABL_MCP_SECURITY_DB_PATH
+              value: /var/lib/abl/control/security.sqlite3
+            - name: ABL_MCP_ARTIFACT_ROOT
+              value: /var/lib/abl/artifacts
+            - name: ABL_MCP_ARTIFACT_KEYS_FILE
+              value: /run/runtime-secrets/artifact-keys
+            - name: ABL_MCP_SIGNING_KEYS_FILE
+              value: /run/runtime-secrets/signing-keys
+            - name: ABL_MCP_POLICY_FILE
+              value: /run/runtime-secrets/policy
+            - name: ABL_MCP_CODE_VERSION
+              value: "0.1.0"
+            - name: ABL_MCP_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: ABL_MCP_WORKER_LEASE_SECONDS
+              value: "60"
+            - name: ABL_MCP_WORKER_POLL_INTERVAL_MS
+              value: "250"
+            - name: ABL_MCP_RATE_LIMIT_WINDOW_MS
+              value: "60000"
+            - name: ABL_MCP_RATE_LIMIT_MAX_REQUESTS
+              value: "120"
+            - name: ABL_MCP_MAX_CONCURRENT_REQUESTS
+              value: "32"
+            - name: ABL_MCP_MAX_CONCURRENT_JOBS
+              value: "4"
+          envFrom:
+            - configMapRef:
+                name: abl-mcp-runtime
+          ports:
+            - name: http
+              containerPort: 3333
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: HTTP
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: HTTP
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: HTTP
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: source-policy
+              mountPath: /run/config
+              readOnly: true
+            - name: prepared-secrets
+              mountPath: /run/runtime-secrets
+              readOnly: true
+            - name: control-data
+              mountPath: /var/lib/abl/control
+            - name: artifact-data
+              mountPath: /var/lib/abl/artifacts
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: source-policy
+          configMap:
+            name: abl-mcp-source-policy
+            defaultMode: 292
+        - name: projected-secrets
+          secret:
+            secretName: abl-mcp-runtime-secrets
+            defaultMode: 288
+            items:
+              - key: artifact-keys
+                path: artifact-keys
+              - key: signing-keys
+                path: signing-keys
+              - key: policy
+                path: policy
+        - name: prepared-secrets
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Mi
+        - name: control-data
+          persistentVolumeClaim:
+            claimName: abl-mcp-control
+        - name: artifact-data
+          persistentVolumeClaim:
+            claimName: abl-mcp-artifacts
+        - name: temporary
+          emptyDir:
+            sizeLimit: 64Mi

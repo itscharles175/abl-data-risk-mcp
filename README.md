@@ -1,84 +1,92 @@
 # ABL Data & Risk MCP
 
-A model-agnostic, read-only MCP server for governed asset-based lending (ABL) and loan-tape analytics.
+A governed, model-independent MCP system for asset-based lending (ABL) and longitudinal loan-tape analytics.
 
-The product thesis is deliberately narrower and safer than “chat with SQL”:
+The product is deliberately narrower than “chat with SQL”:
 
-> The model expresses intent, proposes mappings, and explains results. Deterministic code maps fields, compiles governed queries, calculates portfolio facts, reconciles totals, and preserves lineage.
+> An MCP-capable client may express intent, propose a mapping, and explain a result. Trusted deterministic code authenticates, authorizes, maps, validates, calculates, suppresses, reconciles, and records lineage.
 
-This repository is a working greenfield vertical slice. It currently provides:
+Codex, Claude Code, Claude Desktop, and other products can use this server only when the product supplies a compatible MCP client. The underlying language model does not become MCP-compatible by itself, and this repository does not claim compatibility with every model or host.
 
-- one server factory that supports legacy 2025-era and modern 2026-era MCP clients;
-- STDIO for Codex, Claude Desktop, Claude Code, and other local MCP hosts;
-- Streamable HTTP on a loopback-only development launcher;
-- allowlisted PostgreSQL and SQLite source adapters;
-- a 67-field canonical loan-tape and ABL dictionary;
-- explainable, deterministic field-mapping suggestions and readiness validation;
-- aggregate-only stratification tables for one explicit snapshot date;
-- sparse loan vintage analysis from repeated snapshots;
-- structured tool results plus JSON text fallbacks for client portability;
-- no generic SQL tool, raw-row preview, source writes, or model-side calculations.
+## What is implemented
 
-The larger product direction—including borrowing-base reperformance, automation, monitoring, and the production trust model—is captured in [Product Blueprint](./docs/PRODUCT_BLUEPRINT.md), [Architecture](./docs/ARCHITECTURE.md), [Security](./docs/SECURITY.md), and [Roadmap](./docs/ROADMAP.md).
+The repository now contains an end-to-end governed production runtime, a separate local compatibility surface, and an operator-only control plane.
 
-## Why this shape
+| Surface | Entry point | Purpose |
+|---|---|---|
+| Governed remote MCP | `node dist/remote-cli.js` | OAuth/OIDC-authenticated Streamable HTTP over `/mcp`; tenant-scoped policy, certified snapshots, durable jobs, results, manifests, and alerts. |
+| Local MCP | `node dist/cli.js serve stdio --config ...` | Local STDIO compatibility and development against operator-allowlisted live SQLite/PostgreSQL sources. A loopback-only HTTP mode also exists for development. |
+| Operator control plane | `node dist/operator/main.js <command> --request <file>` | Strict, bounded administration for ingestion, SQL snapshot extraction, mappings, definitions, certification, memberships, alert transitions, and audit inspection. It is not an MCP tool surface. |
 
-Loan and collateral data is semantically dangerous even when SQL is syntactically correct. A field called `balance` may mean original principal, current principal, gross receivables, eligible receivables, lender share, or borrower-reported capacity. A vintage curve is not defensible without a fixed cohort, repeated observations or events, an explicit denominator, and treatment for unseasoned periods. A borrowing base is a legal-policy waterfall whose rule ordering matters.
+Implemented foundations include:
 
-The MCP therefore exposes domain operations, not unrestricted execution:
+- a versioned canonical loan/ABL dictionary and conservative field policy;
+- encrypted, content-addressed, write-once delivered, normalized, input, and result artifacts;
+- immutable tenant-scoped snapshot, DQ, reconciliation, manifest, replay, and audit records;
+- maker/checker lifecycles for mappings, governed definitions, and OAuth tenant memberships;
+- bounded CSV, JSON, and NDJSON ingestion plus allowlisted SQLite and PostgreSQL snapshot extraction;
+- exact-decimal data-quality checks and control-total reconciliation, including `loan_history` certification through a declared cutoff;
+- durable principal-bound jobs authorized by short-lived signed, replay-protected execution plans;
+- deterministic snapshot stratification, vintage analysis, AR borrowing-base reperformance, monitoring, durable alert deduplication, and case transitions;
+- a remote OAuth/OIDC resource server with exact issuer/audience/resource validation, server-side tenant membership, policy evaluation, Host/Origin controls, rate limits, concurrency limits, liveness, and readiness;
+- a hardened Dockerfile, Compose template, Kubernetes base, CI checks, operations guide, and release checklist.
 
-1. inspect an operator-approved source;
-2. map it to governed canonical fields;
-3. validate grain, type, and profile coverage;
-4. run a versioned analysis recipe;
-5. return bounded aggregates, reconciliation, warnings, and lineage.
+There is no generic SQL tool, source-system write, raw-row MCP tool, arbitrary callback/recipient field, or autonomous credit decision.
 
-## Current MCP tools
+## Governed lifecycle
 
-| Tool | Purpose |
-|---|---|
-| `abl_capabilities` | Report protocol, transport, source, and safety capabilities. |
-| `abl_list_sources` | List configured source IDs and allowlists without credentials. |
-| `abl_list_tables` | List allowlisted tables/views for one source. |
-| `abl_describe_table` | Return names, types, nullability, and restriction flags—never comments or values. |
-| `abl_list_dictionary` | Read/filter the canonical lending dictionary. |
-| `abl_suggest_mapping` | Rank mapping candidates with explicit evidence and type checks. |
-| `abl_validate_mapping` | Validate mapping uniqueness, types, and profile readiness. |
-| `abl_run_stratification` | Build a reconciled strat table for one explicit as-of date. |
-| `abl_run_vintage` | Build cohort/month observations from longitudinal snapshots. |
+```mermaid
+flowchart LR
+  I["Trusted file or SQL extraction"] --> S["Encrypted immutable delivered snapshot"]
+  S --> M["Maker/checker active mapping"]
+  M --> Q["DQ and control-total reconciliation"]
+  Q -->|"certified"| N["Encrypted normalized snapshot + manifest"]
+  Q -->|"blocked"| B["Failed certification manifest"]
+  N --> P["OAuth policy + signed execution plan"]
+  P --> J["Durable bounded job worker"]
+  J --> R["Encrypted result + immutable lineage manifest"]
+  J --> A["Deduplicated monitoring alerts/cases"]
+```
 
-The canonical dictionary and methodology are also exposed as optional MCP resources. Tools remain the portable source of truth because client support for resources and prompts varies.
+A failed certification cannot start governed analytics. Monitoring derives its DQ gate from the certification manifest, never from a caller assertion.
+
+## Remote MCP tools
+
+The production server exposes 17 tools:
+
+- catalog: `abl_capabilities`, `abl_list_dictionary`;
+- snapshots: `abl_list_snapshots`, `abl_get_snapshot`;
+- mappings: `abl_list_mappings`, `abl_get_mapping`, `abl_propose_mapping`;
+- definitions and lineage: `abl_list_definitions`, `abl_get_definition`, `abl_get_manifest`;
+- jobs: `abl_start_job`, `abl_get_job_status`, `abl_get_job_result`, `abl_cancel_job`;
+- monitoring cases: `abl_list_alerts`, `abl_get_alert`, `abl_transition_alert`.
+
+`abl_start_job` supports `snapshot_stratification`, `snapshot_vintage`, `ar_borrowing_base`, and `monitoring`. Job and result access uses opaque handles bound to the verified principal. Mapping proposals never self-approve or self-activate.
+
+The legacy local server exposes the original nine direct-source tools: `abl_capabilities`, source/table discovery, dictionary lookup, mapping suggestion/validation, stratification, and vintage. It remains useful for local exploration and compatibility testing, but its live-table analyses are not certified governed artifacts.
 
 ## Quick start
 
-Requirements: Node.js 22.13+ and pnpm.
+Requirements: Node.js `>=22.13` and pnpm.
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 pnpm run verify
 pnpm run audit:prod
-pnpm build
+pnpm run build
 ```
 
-Copy [config/example.json](./config/example.json) and change only non-secret source policy. Database URLs must live in the environment variable named by `connectionEnv`; they must never be written into config or passed as tool arguments.
+### Local STDIO
 
-Start the local STDIO server:
+Copy [config/example.json](./config/example.json), keep database credentials outside JSON, then run:
 
 ```sh
-ABL_MCP_CONFIG=/absolute/path/to/config.json node dist/cli.js serve stdio
+node dist/cli.js serve stdio --config /absolute/path/to/config.json
 ```
 
-Start the loopback-only Streamable HTTP server:
+PostgreSQL URLs are read from the environment variable named by `connectionEnv`. SQLite paths are operator configuration. Neither is accepted in MCP tool arguments.
 
-```sh
-node dist/cli.js serve http --config /absolute/path/to/config.json --port 3333
-```
-
-The bundled HTTP launcher refuses non-loopback binds. A remote deployment must mount `createAblHttpHandler` behind an OAuth/OIDC resource-server gateway that validates issuer, audience, subject, tenant, scopes, Host, and Origin before MCP dispatch.
-
-## Codex configuration
-
-Project-scoped `.codex/config.toml`:
+Codex project configuration:
 
 ```toml
 [mcp_servers.abl]
@@ -90,15 +98,11 @@ args = [
   "--config",
   "/absolute/path/to/SQLProject/config/local.json"
 ]
-default_tools_approval_mode = "writes"
+required = true
 tool_timeout_sec = 60
 ```
 
-Codex supports STDIO and Streamable HTTP. See the current [OpenAI Codex MCP documentation](https://developers.openai.com/codex/extend/mcp).
-
-## Claude configuration
-
-Project `.mcp.json` for a local server:
+Claude Code or Claude Desktop local configuration:
 
 ```json
 {
@@ -118,59 +122,59 @@ Project `.mcp.json` for a local server:
 }
 ```
 
-Claude Code also supports remote Streamable HTTP. See the current [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+The local loopback-only development HTTP command is:
 
-## Source configuration
-
-Sources are operator-controlled and closed-world:
-
-```json
-{
-  "sources": [
-    {
-      "id": "portfolio",
-      "dialect": "postgres",
-      "connectionEnv": "ABL_PORTFOLIO_DATABASE_URL",
-      "allowedSchemas": ["analytics"],
-      "allowedTables": ["analytics.loan_tape"],
-      "restrictedColumns": ["customer_legal_name"],
-      "statementTimeoutMs": 15000,
-      "maxResultRows": 500
-    }
-  ],
-  "analysis": {
-    "maxGroups": 200,
-    "maxVintagePoints": 5000,
-    "minimumCohortSize": 10
-  }
-}
+```sh
+node dist/cli.js serve http --config /absolute/path/to/config.json --host 127.0.0.1 --port 3333
 ```
 
-The runtime resolves every requested table against this allowlist. Analysis SQL is generated only from exact catalog matches and canonical mappings. PostgreSQL analysis runs inside a read-only transaction with statement and lock timeouts. SQLite is useful for local development and golden tests; its dynamic numeric representation is not a substitute for a production exact-decimal warehouse.
+Do not expose that unauthenticated launcher through a public bind, tunnel, or reverse proxy.
 
-## Analysis semantics
+### Governed remote runtime
 
-Stratifications:
+The authenticated entry point is:
 
-- require one explicit `as_of_date`;
-- always include null values as `Unknown/Unmapped`;
-- require explicit buckets for numeric dimensions;
-- reject dictionary fields classified as restricted from dimensions and weighted outputs;
-- return count, balance, balance share, and up to five weighted averages;
-- reconcile bucket count/balance to the selected population;
-- suppress small and complementary cells using the server threshold.
+```sh
+node dist/remote-cli.js
+```
 
-Vintages:
+It has no anonymous or development fallback. `ABL_AUTH_MODE=oauth` and the complete validated runtime contract are required, including `ABL_MCP_PUBLIC_URL`, exact Host/Origin allowlists, OAuth resource/issuer/scopes, control/job/security storage paths, artifact root, policy file, signing and artifact key files, worker settings, and bounded request/job limits. See [Operations](./docs/OPERATIONS.md) for the authoritative setting table and deployment procedure.
 
-- require longitudinal snapshots or event history;
-- fix cohort membership from origination date;
-- deduplicate to the latest observation per loan/month-on-book;
-- use original cohort balance as the loss and remaining-balance denominator;
-- omit unseasoned cohort/month cells so callers render them as `null`, never zero;
-- disclose whether cumulative net loss and delinquency inputs are mapped;
-- suppress small cohorts.
+### Operator control plane
 
-Current live-table fingerprints identify the mapping and compiled query, but do not make a result audit-reproducible. Production runs need an immutable snapshot/content hash and versioned mapping, recipe, policy, FX, and compiler metadata.
+The operator CLI accepts exactly one command and one bounded JSON request file:
+
+```sh
+node dist/operator/main.js --help
+node dist/operator/main.js ingest-file --request /secure/requests/ingest.json
+node dist/operator/main.js extract-sql --request /secure/requests/extract.json
+node dist/operator/main.js certify-snapshot --request /secure/requests/certify.json
+```
+
+Current commands are `ingest-file`, `extract-sql`, `mapping-propose`, `mapping-transition`, `definition-propose`, `definition-transition`, `certify-snapshot`, `put-input-artifact`, `membership-propose`, `membership-approve`, `membership-revoke`, `alerts-list`, `alert-transition`, and `audit-list`.
+
+The local operator executable is a privileged global-administration boundary. It derives a stable, non-reversible principal ID from the operating-system account; request documents cannot choose actor, proposer, approver, delivery, certification, or transition identities. A `tenantId` in an operator request selects a governed resource—it is not authentication. The current identity design is approved only for one trusted host with distinct, non-reused authorized OS accounts; do not share its control storage across hosts or container UID namespaces. Cross-host administration requires a host- or IdP-bound trusted operator identity. Run maker and checker steps under distinct authorized OS accounts.
+
+Trusted SQL snapshot extraction additionally uses `ABL_OPERATOR_SQL_POLICIES_FILE`. Every policy is bound to exactly one tenant and a dedicated physical table (`tenantIsolation: "dedicated_relation"`, `relationKind: "table"`), and contains opaque dataset/relation/column IDs, validated physical identifiers, exact-text/native encodings, an attested unique order, optional required watermark, and row/column/cell/byte/time limits. Extraction requests cannot contain SQL, credentials, connection strings, filesystem paths, filters, expressions, joins, or URLs.
+
+## Deterministic analytical semantics
+
+Snapshot stratification uses canonical-field-keyed records, exact decimal arithmetic, explicit validated buckets, stable ordering, fixed execution bounds, totals reconciliation, minimum-cell suppression, and complementary suppression. Restricted identifier-like fields cannot appear in published dimensions or weighted outputs.
+
+Vintage analysis fixes origination cohorts and original-balance denominators, selects a deterministic latest observation per loan/month, returns `null` for unseasoned or unavailable metrics, and rejects conflicting observations or unstable denominators.
+
+The AR borrowing-base engine applies effective-dated eligibility rules, cross-aging, concentration, advance rate, component sublimit, reserves, commitment, defined usage, availability, and overadvance in a deterministic waterfall with exact values and reason-coded steps.
+
+Monitoring evaluates typed, effective-dated decimal or boolean thresholds only after certification. Successful runs persist immutable evidence, deduplicate occurrences into durable alert cases, and support governed acknowledgement, escalation, resolution, suppression, and reopening. Notification delivery remains a separate external concern.
+
+## Deployment assets
+
+- [Dockerfile](./Dockerfile) builds a non-root, read-only production image; its default command remains the safe local STDIO surface.
+- [deploy/compose.yaml](./deploy/compose.yaml) explicitly selects `dist/remote-cli.js` under the `remote` profile and binds the published port to loopback.
+- [deploy/kubernetes](./deploy/kubernetes) provides a one-replica `Recreate` base with ClusterIP service, persistent control/artifact storage, hardened security contexts, probes, and default-deny networking.
+- [.github/workflows/ci.yml](./.github/workflows/ci.yml) defines locked verification, deployment rendering/schema checks, IaC/secret/image scans, SBOM generation, and container smoke checks.
+
+These are reviewed templates and CI definitions, not evidence that a public environment has been deployed.
 
 ## Verification
 
@@ -178,17 +182,18 @@ Current live-table fingerprints identify the mapping and compiled query, but do 
 pnpm run verify
 ```
 
-The suite covers the dictionary and mapper, a real read-only SQLite fixture, stratification/vintage golden results, output-schema validation, JSON text fallbacks, and both MCP protocol eras over HTTP and a spawned STDIO process. Separate manual smokes with Codex CLI `0.147.0-alpha.6.5` successfully called `abl_capabilities` over both STDIO and loopback Streamable HTTP; real Claude Code remains a release gate.
+The suite covers protocol-era compatibility, local and authenticated HTTP boundaries, OAuth/JWKS verification, live membership and policy reauthorization, immutable/version-guarded stores, encrypted artifacts, replay-protected claim-time plans, bounded worker execution and crash recovery, queue leases/reaping, ingestion and certification, exact domain calculations, disclosure controls, alerts, operator identity, and fake-pool PostgreSQL cursor/transaction/cancellation behavior.
 
-`pnpm run audit:prod` checks the locked production dependency graph. The workspace pins a patched Hono Node adapter because the MCP Node package's declared transitive range otherwise resolves to a version affected by GHSA-frvp-7c67-39w9.
+## Honest limits
 
-## Current limits
+- PostgreSQL snapshot extraction is implemented and adversarially tested with an injected fake pool, but this repository has not certified it against a live PostgreSQL environment.
+- The OCI image has been built, smoke-tested, SBOMed, and scanned locally, but no live cloud deployment, registry promotion/signing, TLS gateway, real IdP, or production restore exercise has been completed here.
+- Real Codex CLI exercised tool discovery and `abl_capabilities`; real Claude Code completed its MCP connection health check; the official SDK exercised both legacy and modern protocol eras. Claude Desktop and authenticated remote-client acceptance remain external release gates.
+- Recurring scheduling, delivery detection, and notification delivery are intentionally out of process. The runtime has a durable worker for queued jobs, not a calendar scheduler or message dispatcher.
+- The durable deployment base uses local SQLite control stores and encrypted filesystem artifacts, so it is one replica with `Recreate`; horizontal scale requires external transactional stores and distributed lease evidence.
+- Durable SQLite stores are greenfield/component-registry deployments. An arbitrary pre-registry database is not an approved in-place upgrade source; migrate it offline with an explicitly reviewed, backed-up migration plan (only the documented legacy alert metadata shape has automatic adoption).
+- Audit rows are append-only in the local control stores, but export to a separately administered WORM audit system is still an operational integration.
+- CSV, JSON, NDJSON, SQLite, and PostgreSQL snapshot extraction are implemented. XLSX, Parquet, Snowflake, BigQuery, SQL Server, MySQL, and other adapters are not certified claims.
+- There is intentionally no arbitrary SQL, source write, or raw-row MCP tool.
 
-- PostgreSQL is implemented but not yet certified against a live integration environment in this repository.
-- CSV, XLSX, Parquet, Snowflake, BigQuery, SQL Server, and MySQL are roadmap adapters, not current claims.
-- There is no mapping persistence/approval workflow yet; mappings are passed explicitly into an analysis call.
-- There is no arbitrary SQL, raw-row export, scheduler, alert dispatcher, or source-system write path.
-- Borrowing-base calculation is designed but not yet implemented in code.
-- The local HTTP launcher is for development, not an internet-facing production service.
-
-These constraints are intentional. The next useful milestone is a snapshot-backed pilot with persisted mapping versions, data-quality/reconciliation manifests, saved strat recipes, and one real portfolio—not a broader ungoverned query surface.
+For deeper design and operating details, see [Architecture](./docs/ARCHITECTURE.md), [Security](./docs/SECURITY.md), [Product Blueprint](./docs/PRODUCT_BLUEPRINT.md), [Roadmap](./docs/ROADMAP.md), [Operations](./docs/OPERATIONS.md), and the [Release Checklist](./docs/RELEASE_CHECKLIST.md).

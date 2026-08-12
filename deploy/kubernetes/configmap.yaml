@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: abl-mcp-source-policy
+  namespace: abl-mcp
+  labels:
+    app.kubernetes.io/name: abl-mcp
+immutable: true
+data:
+  abl.json: |
+    {
+      "sources": [],
+      "analysis": {
+        "maxGroups": 200,
+        "maxVintagePoints": 5000,
+        "minimumCohortSize": 10
+      }
+    }

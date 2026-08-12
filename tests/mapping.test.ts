@@ -18,7 +18,8 @@ test("normalization and SQL type classification are deterministic", () => {
   assert.equal(classifySourceType("made_up_type"), "unknown");
   assert.equal(compareTypes("numeric(18,2)", "currency"), "exact");
   assert.equal(compareTypes("timestamp", "date"), "compatible");
-  assert.equal(compareTypes("varchar", "currency"), "incompatible");
+  assert.equal(compareTypes("varchar", "currency"), "compatible");
+  assert.equal(compareTypes("text", "date"), "compatible");
 });
 
 test("suggestions rank canonical-id and alias matches first with evidence", () => {

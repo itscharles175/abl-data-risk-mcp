@@ -1,0 +1,107 @@
+name: abl-mcp
+
+services:
+  abl-mcp:
+    profiles: ["remote"]
+    image: ${ABL_MCP_IMAGE:-abl-mcp-server:local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${ABL_MCP_VERSION:-0.1.0}
+        VCS_REF: ${ABL_MCP_VCS_REF:-unknown}
+        BUILD_DATE: ${ABL_MCP_BUILD_DATE:-unknown}
+    init: true
+    user: "65532:65532"
+    command: ["/app/scripts/container-entrypoint.mjs", "serve-remote"]
+    environment:
+      ABL_MCP_CONFIG: /run/config/abl.json
+      ABL_MCP_HOST: 0.0.0.0
+      ABL_MCP_PORT: "3333"
+      ABL_MCP_PUBLIC_URL: ${ABL_MCP_PUBLIC_URL:-}
+      ABL_AUTH_MODE: oauth
+      ABL_OAUTH_RESOURCE: ${ABL_OAUTH_RESOURCE:-}
+      ABL_OAUTH_ISSUERS_JSON: ${ABL_OAUTH_ISSUERS_JSON:-}
+      ABL_OAUTH_MAX_TOKEN_LENGTH: ${ABL_OAUTH_MAX_TOKEN_LENGTH:-16384}
+      ABL_OAUTH_SCOPES_SUPPORTED: ${ABL_OAUTH_SCOPES_SUPPORTED:-}
+      ABL_OAUTH_RESOURCE_NAME: ${ABL_OAUTH_RESOURCE_NAME:-ABL Data and Risk MCP}
+      ABL_OAUTH_RESOURCE_DOCUMENTATION: ${ABL_OAUTH_RESOURCE_DOCUMENTATION:-}
+      ABL_MCP_ALLOWED_HOSTS: ${ABL_MCP_ALLOWED_HOSTS:-}
+      ABL_MCP_ALLOWED_ORIGINS: ${ABL_MCP_ALLOWED_ORIGINS:-}
+      ABL_MCP_CONTROL_DB_PATH: /var/lib/abl/control/control.sqlite3
+      ABL_MCP_JOB_DB_PATH: /var/lib/abl/control/jobs.sqlite3
+      ABL_MCP_SECURITY_DB_PATH: /var/lib/abl/control/security.sqlite3
+      ABL_MCP_ARTIFACT_ROOT: /var/lib/abl/artifacts
+      ABL_MCP_ARTIFACT_KEYS_FILE: /run/runtime-secrets/artifact-keys
+      ABL_MCP_SIGNING_KEYS_FILE: /run/runtime-secrets/signing-keys
+      ABL_MCP_POLICY_FILE: /run/runtime-secrets/policy
+      ABL_MCP_CODE_VERSION: ${ABL_MCP_CODE_VERSION:-0.1.0}
+      ABL_MCP_WORKER_ID: ${ABL_MCP_WORKER_ID:-compose-worker-01}
+      ABL_MCP_WORKER_LEASE_SECONDS: ${ABL_MCP_WORKER_LEASE_SECONDS:-60}
+      ABL_MCP_WORKER_POLL_INTERVAL_MS: ${ABL_MCP_WORKER_POLL_INTERVAL_MS:-250}
+      ABL_MCP_RATE_LIMIT_WINDOW_MS: ${ABL_MCP_RATE_LIMIT_WINDOW_MS:-60000}
+      ABL_MCP_RATE_LIMIT_MAX_REQUESTS: ${ABL_MCP_RATE_LIMIT_MAX_REQUESTS:-120}
+      ABL_MCP_MAX_CONCURRENT_REQUESTS: ${ABL_MCP_MAX_CONCURRENT_REQUESTS:-32}
+      ABL_MCP_MAX_CONCURRENT_JOBS: ${ABL_MCP_MAX_CONCURRENT_JOBS:-4}
+    configs:
+      - source: source-policy
+        target: /run/config/abl.json
+        mode: 0444
+    secrets:
+      - source: artifact-keys
+        target: artifact-keys
+        mode: 0444
+      - source: signing-keys
+        target: signing-keys
+        mode: 0444
+      - source: policy
+        target: policy
+        mode: 0444
+    volumes:
+      - control-data:/var/lib/abl/control
+      - artifact-data:/var/lib/abl/artifacts
+    ports:
+      - "127.0.0.1:${ABL_MCP_PUBLISHED_PORT:-3333}:3333"
+    healthcheck:
+      test: ["CMD", "/nodejs/bin/node", "/app/scripts/container-healthcheck.mjs", "http://127.0.0.1:3333/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+      - /run/runtime-secrets:size=2m,mode=0700,uid=65532,gid=65532,noexec,nosuid,nodev
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+    networks: ["backplane"]
+
+configs:
+  source-policy:
+    file: ${ABL_MCP_CONFIG_FILE:-../config/example.json}
+
+secrets:
+  artifact-keys:
+    file: ${ABL_MCP_ARTIFACT_KEYS_FILE_SOURCE:-/dev/null}
+  signing-keys:
+    file: ${ABL_MCP_SIGNING_KEYS_FILE_SOURCE:-/dev/null}
+  policy:
+    file: ${ABL_MCP_POLICY_FILE_SOURCE:-/dev/null}
+
+volumes:
+  control-data: {}
+  artifact-data: {}
+
+networks:
+  backplane:
+    driver: bridge

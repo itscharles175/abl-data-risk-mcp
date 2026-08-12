@@ -343,20 +343,21 @@ export function compareTypes(
       return source === "string" ? "exact" : "incompatible";
     case "integer":
       if (source === "integer") return "exact";
-      return source === "decimal" ? "compatible" : "incompatible";
+      return source === "decimal" || source === "string" ? "compatible" : "incompatible";
     case "decimal":
     case "currency":
     case "percentage":
       if (source === "decimal") return "exact";
-      return source === "integer" ? "compatible" : "incompatible";
+      return source === "integer" || source === "string" ? "compatible" : "incompatible";
     case "boolean":
-      return source === "boolean" ? "exact" : "incompatible";
+      if (source === "boolean") return "exact";
+      return source === "string" ? "compatible" : "incompatible";
     case "date":
       if (source === "date") return "exact";
-      return source === "datetime" ? "compatible" : "incompatible";
+      return source === "datetime" || source === "string" ? "compatible" : "incompatible";
     case "datetime":
       if (source === "datetime") return "exact";
-      return source === "date" ? "compatible" : "incompatible";
+      return source === "date" || source === "string" ? "compatible" : "incompatible";
   }
 
   const exhaustive: never = logicalType;
