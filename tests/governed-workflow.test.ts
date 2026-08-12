@@ -7,6 +7,7 @@ import { afterEach, test } from "node:test";
 import { ArtifactStore } from "../src/control/artifacts.js";
 import { MonitoringAlertStore } from "../src/control/alerts.js";
 import { DefinitionStore, type DefinitionKind } from "../src/control/definitions.js";
+import { InputCertificationStore } from "../src/control/input-certifications.js";
 import { JobStore } from "../src/control/jobs.js";
 import { ControlStore, type JsonValue } from "../src/control/store.js";
 import type { DataQualityProfile } from "../src/domain/data-quality.js";
@@ -16,6 +17,7 @@ import {
   type GovernedWorkflowOperation
 } from "../src/services/governed-workflow.js";
 import { SnapshotIngestionService } from "../src/services/ingestion.js";
+import { InputCertificationService } from "../src/services/input-certification.js";
 import { runSnapshotStratification } from "../src/services/snapshot-analysis.js";
 import {
   createVerifiedPrincipalContext,
@@ -140,6 +142,7 @@ function fixture(
   });
   const jobs = new JobStore(join(directory, "jobs.sqlite"), { clock });
   const monitoringAlerts = new MonitoringAlertStore(join(directory, "monitoring.sqlite"), { clock });
+  const inputCertifications = new InputCertificationStore(join(directory, "control.sqlite"), { clock });
   const securityState = new SecurityStateStore(join(directory, "security.sqlite"), { clock });
   let membershipActive = true;
   const tenantMembershipResolver = {
@@ -158,6 +161,7 @@ function fixture(
     () => definitions.close(),
     () => jobs.close(),
     () => monitoringAlerts.close(),
+    () => inputCertifications.close(),
     () => securityState.close()
   );
 
@@ -284,6 +288,7 @@ function fixture(
       artifacts,
       jobs,
       monitoringAlerts,
+      inputCertifications,
       securityState,
       tenantMembershipResolver,
       policy,
@@ -291,7 +296,7 @@ function fixture(
     },
     { codeVersion: "test-1", clock, defaultHandleTtlSeconds: 60 }
   );
-  const borrowingBaseArtifact = artifacts.putJson({
+  const borrowingBaseCandidate = artifacts.putJson({
     tenantId: "tenant-a",
     kind: "borrowing_base_input",
     mediaType: "application/json",
@@ -310,7 +315,12 @@ function fixture(
       usage: [{ usageId: "usage-1", kind: "revolver", amount: "20" }]
     }
   });
-  const monitoringArtifact = artifacts.putJson({
+  const primaryManifest = control.getAnalysisManifest("tenant-a", "certification-2026-07");
+  const normalizedArtifactId = primaryManifest?.artifacts.find(
+    (artifact) => artifact.kind === "normalized_snapshot"
+  )?.artifactId;
+  assert.ok(normalizedArtifactId);
+  const monitoringCandidate = artifacts.putJson({
     tenantId: "tenant-a",
     kind: "monitoring_input",
     mediaType: "application/json",
@@ -327,11 +337,60 @@ function fixture(
           type: "decimal",
           value: "-1",
           unit: "currency",
-          evidence: []
+          evidence: [{ kind: "source_artifact", id: normalizedArtifactId }]
         }
       ]
     }
   });
+
+  const inputCertification = new InputCertificationService(
+    { control, definitions, artifacts, inputCertifications },
+    clock
+  );
+  inputCertification.propose({
+    tenantId: "tenant-a",
+    inputId: "borrowing-input-v1",
+    inputKind: "borrowing_base",
+    candidateArtifactId: borrowingBaseCandidate.artifactId,
+    primaryCertificationManifestId: "certification-2026-07",
+    definitionIds: ["borrowing-base-v1"],
+    purpose: "portfolio-risk-review",
+    declaredControls: { rowCount: 2, balance: "150", currency: "USD" },
+    proposedBy: "input-maker",
+    idempotencyKey: "propose-borrowing-input"
+  });
+  const borrowingCertification = inputCertification.certify({
+    tenantId: "tenant-a",
+    inputId: "borrowing-input-v1",
+    certifiedBy: "input-checker",
+    idempotencyKey: "certify-borrowing-input"
+  });
+  inputCertification.propose({
+    tenantId: "tenant-a",
+    inputId: "monitoring-input-v1",
+    inputKind: "monitoring",
+    candidateArtifactId: monitoringCandidate.artifactId,
+    primaryCertificationManifestId: "certification-2026-07",
+    definitionIds: ["monitor-v1"],
+    purpose: "portfolio-risk-review",
+    declaredControls: { rowCount: 1 },
+    proposedBy: "input-maker",
+    idempotencyKey: "propose-monitoring-input"
+  });
+  const monitoringCertification = inputCertification.certify({
+    tenantId: "tenant-a",
+    inputId: "monitoring-input-v1",
+    certifiedBy: "input-checker",
+    idempotencyKey: "certify-monitoring-input"
+  });
+  const borrowingBaseArtifact = artifacts.getJson(
+    "tenant-a",
+    borrowingCertification.certifiedArtifactId
+  ).metadata;
+  const monitoringArtifact = artifacts.getJson(
+    "tenant-a",
+    monitoringCertification.certifiedArtifactId
+  ).metadata;
 
   return {
     control,
@@ -410,7 +469,7 @@ test("all governed operations execute through signed, encrypted, immutable durab
           alerts: readonly { severity: string }[];
         };
         assert.equal(value.status, "evaluated");
-        assert.equal(value.gateId, "certification-2026-07");
+        assert.match(value.gateId, /^sha256:[a-f0-9]{64}$/);
         assert.equal(value.alerts.length, 1);
         assert.equal(value.alerts[0]?.severity, "critical");
       }
@@ -423,6 +482,11 @@ test("all governed operations execute through signed, encrypted, immutable durab
       certificationManifestId: "certification-2026-07",
       definitionIds: item.definitionIds,
       ...(item.inputArtifactId === undefined ? {} : { inputArtifactId: item.inputArtifactId }),
+      ...(
+        item.operation === "ar_borrowing_base" || item.operation === "monitoring"
+          ? { purpose: "portfolio-risk-review" }
+          : {}
+      ),
       idempotencyKey: `operation-${index}`
     });
     assert.equal(started.status, "queued");
@@ -796,6 +860,7 @@ test("borrowing-base row limits count the published waterfall rather than stripp
     certificationManifestId: "certification-2026-07",
     definitionIds: ["borrowing-base-v1"],
     inputArtifactId: environment.borrowingBaseArtifact.artifactId,
+    purpose: "portfolio-risk-review",
     idempotencyKey: "borrowing-base-published-row-limit"
   });
 
@@ -1064,6 +1129,7 @@ test("failed certification and caller-supplied monitoring gate claims are blocke
         certificationManifestId: "certification-2026-07",
         definitionIds: ["monitor-v1"],
         inputArtifactId: callerGateArtifact.artifactId,
+        purpose: "portfolio-risk-review",
         idempotencyKey: "caller-gate"
       }),
     (error: unknown) => error instanceof GovernedWorkflowError && error.code === "INVALID_INPUT"

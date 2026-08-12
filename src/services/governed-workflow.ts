@@ -7,6 +7,7 @@ import * as z from "zod/v4";
 import type { MonitoringAlertStore } from "../control/alerts.js";
 import type { ArtifactStore, StoredArtifact } from "../control/artifacts.js";
 import type { DefinitionKind, DefinitionStore, GovernedDefinition } from "../control/definitions.js";
+import type { InputCertificationStore } from "../control/input-certifications.js";
 import { JobStoreError, type JobRecord, type JobStore } from "../control/jobs.js";
 import type {
   AnalysisManifest,
@@ -67,6 +68,7 @@ import {
   type SnapshotStratificationResult,
   type SnapshotVintageResult
 } from "./snapshot-analysis.js";
+import { InputCertificationService } from "./input-certification.js";
 
 export type GovernedWorkflowOperation =
   | "snapshot_stratification"
@@ -133,6 +135,7 @@ export interface GovernedWorkflowServices {
   readonly artifacts: ArtifactStore;
   readonly jobs: JobStore;
   readonly monitoringAlerts: MonitoringAlertStore;
+  readonly inputCertifications: InputCertificationStore;
   readonly securityState: SecurityStateStore;
   readonly tenantMembershipResolver: TenantMembershipResolver;
   readonly policy: CompiledAuthorizationPolicy;
@@ -188,6 +191,23 @@ interface InputArtifactReference {
   readonly artifactId: string;
   readonly contentHash: string;
   readonly kind: string;
+  readonly certification?: CertifiedInputLineageSummary;
+}
+
+interface CertifiedInputLineageSummary {
+  readonly inputId: string;
+  readonly envelopeHash: string;
+  readonly lineageHash: string;
+  readonly derivationHash: string;
+  readonly primaryCertificationHash: string;
+  readonly primaryPopulationHash: string;
+  readonly sidecarCertificationHash: string;
+  readonly sidecarPopulationHash: string;
+  readonly dataQualityRunId: string;
+  readonly dataQualityResultHash: string;
+  readonly reconciliationId: string;
+  readonly reconciliationResultHash: string;
+  readonly certifiedAt: string;
 }
 
 export interface LoadedInputArtifact {
@@ -205,7 +225,7 @@ export interface GovernedAnalysisExecutionPayload {
 }
 
 interface ExecutionEnvelope {
-  readonly version: 2;
+  readonly version: 2 | 3;
   readonly operation: GovernedWorkflowOperation;
   readonly certificationManifestId: string;
   readonly definitionIds: readonly string[];
@@ -228,7 +248,7 @@ interface ExecutionEnvelope {
 }
 
 interface ResultArtifactPayload {
-  readonly version: 2;
+  readonly version: 2 | 3;
   readonly jobId: string;
   readonly manifestId: string;
   readonly operation: GovernedWorkflowOperation;
@@ -249,6 +269,7 @@ interface ResultArtifactPayload {
     readonly dictionaryHash: string;
     readonly recipeHash: string;
     readonly inputArtifactHash: string | null;
+    readonly inputCertification?: CertifiedInputLineageSummary | null;
   };
   readonly result: unknown;
 }
@@ -297,34 +318,75 @@ const identityAttestationSchema = z
   })
   .strict();
 
-const inputArtifactReferenceSchema = z
+const legacyInputArtifactReferenceSchema = z
   .object({ artifactId: hashSchema, contentHash: hashSchema, kind: identifierSchema })
   .strict();
 
-const executionEnvelopeSchema = z
+const certifiedInputLineageSummarySchema = z
   .object({
-    version: z.literal(2),
-    operation: operationSchema,
-    certificationManifestId: identifierSchema,
-    definitionIds: z.array(identifierSchema).min(1).max(100),
-    inputArtifact: inputArtifactReferenceSchema.nullable(),
-    identity: identityAttestationSchema,
-    requestedFields: z.array(identifierSchema).max(2_000),
-    purpose: identifierSchema.nullable(),
-    planTtlSeconds: z.number().int().min(1).max(900),
-    authorizationReceiptId: hashSchema,
-    parameterFingerprint: hashSchema,
-    schemaFingerprint: hashSchema,
-    snapshotFingerprint: hashSchema,
-    mappingFingerprint: hashSchema,
-    mappingDigest: controlDigestSchema,
-    recipeFingerprint: hashSchema,
-    policyFingerprint: hashSchema,
-    idempotencyFingerprint: hashSchema,
-    startFingerprint: hashSchema,
-    auditTags: z.array(identifierSchema).max(256)
+    inputId: identifierSchema,
+    envelopeHash: controlDigestSchema,
+    lineageHash: controlDigestSchema,
+    derivationHash: controlDigestSchema,
+    primaryCertificationHash: controlDigestSchema,
+    primaryPopulationHash: controlDigestSchema,
+    sidecarCertificationHash: controlDigestSchema,
+    sidecarPopulationHash: controlDigestSchema,
+    dataQualityRunId: identifierSchema,
+    dataQualityResultHash: controlDigestSchema,
+    reconciliationId: identifierSchema,
+    reconciliationResultHash: controlDigestSchema,
+    certifiedAt: isoDateTimeSchema
   })
   .strict();
+
+const certifiedInputArtifactReferenceSchema = z
+  .object({
+    artifactId: hashSchema,
+    contentHash: hashSchema,
+    kind: z.enum(["certified_borrowing_base_input", "certified_monitoring_input"]),
+    certification: certifiedInputLineageSummarySchema
+  })
+  .strict();
+
+const executionEnvelopeBaseShape = {
+  operation: operationSchema,
+  certificationManifestId: identifierSchema,
+  definitionIds: z.array(identifierSchema).min(1).max(100),
+  identity: identityAttestationSchema,
+  requestedFields: z.array(identifierSchema).max(2_000),
+  purpose: identifierSchema.nullable(),
+  planTtlSeconds: z.number().int().min(1).max(900),
+  authorizationReceiptId: hashSchema,
+  parameterFingerprint: hashSchema,
+  schemaFingerprint: hashSchema,
+  snapshotFingerprint: hashSchema,
+  mappingFingerprint: hashSchema,
+  mappingDigest: controlDigestSchema,
+  recipeFingerprint: hashSchema,
+  policyFingerprint: hashSchema,
+  idempotencyFingerprint: hashSchema,
+  startFingerprint: hashSchema,
+  auditTags: z.array(identifierSchema).max(256)
+} as const;
+
+const executionEnvelopeSchema = z
+  .discriminatedUnion("version", [
+    z
+      .object({
+        version: z.literal(2),
+        ...executionEnvelopeBaseShape,
+        inputArtifact: legacyInputArtifactReferenceSchema.nullable()
+      })
+      .strict(),
+    z
+      .object({
+        version: z.literal(3),
+        ...executionEnvelopeBaseShape,
+        inputArtifact: certifiedInputArtifactReferenceSchema.nullable()
+      })
+      .strict()
+  ]);
 
 const certificationParametersSchema = z
   .object({
@@ -570,50 +632,70 @@ const monitoringInputSchema = z
   })
   .strict();
 
-const resultArtifactSchema = z
+const resultAuthorizationSchema = z
   .object({
-    version: z.literal(2),
+    decisionId: hashSchema,
+    policyFingerprint: hashSchema,
+    requestedFields: z.array(identifierSchema).max(2_000),
+    purpose: identifierSchema.nullable(),
+    obligations: z
+      .object({
+        maxResultRows: z.number().int().positive(),
+        maxResultBytes: z.number().int().positive(),
+        maxExecutionMs: z.number().int().positive(),
+        minimumCohortSize: z.number().int().positive(),
+        requireImmutableSnapshot: z.boolean(),
+        allowRawRows: z.boolean(),
+        allowExport: z.boolean(),
+        rowFilterRefs: z.array(identifierSchema).max(10_000),
+        fieldMasks: z.record(identifierSchema, z.enum(["partial", "hash", "tokenize", "redact"])),
+        auditTags: z.array(identifierSchema).max(256)
+      })
+      .strict()
+  })
+  .strict();
+
+const resultLineageBaseShape = {
+  snapshotHash: hashSchema,
+  mappingHash: hashSchema,
+  mappingDigest: controlDigestSchema,
+  dictionaryHash: hashSchema,
+  recipeHash: hashSchema,
+  inputArtifactHash: hashSchema.nullable()
+} as const;
+
+const resultArtifactBaseShape = {
     jobId: identifierSchema,
     manifestId: identifierSchema,
     operation: operationSchema,
     certificationManifestId: identifierSchema,
     definitionIds: z.array(identifierSchema).min(1).max(100),
     resultHash: hashSchema,
-    authorization: z
-      .object({
-        decisionId: hashSchema,
-        policyFingerprint: hashSchema,
-        requestedFields: z.array(identifierSchema).max(2_000),
-        purpose: identifierSchema.nullable(),
-        obligations: z
-          .object({
-            maxResultRows: z.number().int().positive(),
-            maxResultBytes: z.number().int().positive(),
-            maxExecutionMs: z.number().int().positive(),
-            minimumCohortSize: z.number().int().positive(),
-            requireImmutableSnapshot: z.boolean(),
-            allowRawRows: z.boolean(),
-            allowExport: z.boolean(),
-            rowFilterRefs: z.array(identifierSchema).max(10_000),
-            fieldMasks: z.record(identifierSchema, z.enum(["partial", "hash", "tokenize", "redact"])),
-            auditTags: z.array(identifierSchema).max(256)
-          })
-          .strict()
-      })
-      .strict(),
-    lineage: z
-      .object({
-        snapshotHash: hashSchema,
-        mappingHash: hashSchema,
-        mappingDigest: controlDigestSchema,
-        dictionaryHash: hashSchema,
-        recipeHash: hashSchema,
-        inputArtifactHash: hashSchema.nullable()
-      })
-      .strict(),
+    authorization: resultAuthorizationSchema,
     result: z.unknown()
-  })
-  .strict();
+} as const;
+
+const resultArtifactSchema = z.discriminatedUnion("version", [
+  z
+    .object({
+      version: z.literal(2),
+      ...resultArtifactBaseShape,
+      lineage: z.object(resultLineageBaseShape).strict()
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(3),
+      ...resultArtifactBaseShape,
+      lineage: z
+        .object({
+          ...resultLineageBaseShape,
+          inputCertification: certifiedInputLineageSummarySchema.nullable()
+        })
+        .strict()
+    })
+    .strict()
+]);
 
 const TOOL_NAMES: Readonly<Record<GovernedWorkflowOperation, string>> = {
   snapshot_stratification: "abl_run_snapshot_stratification",
@@ -630,8 +712,8 @@ const EXPECTED_DEFINITION_KIND: Readonly<Record<GovernedWorkflowOperation, Defin
 };
 
 const EXPECTED_INPUT_KIND: Readonly<Partial<Record<GovernedWorkflowOperation, string>>> = {
-  ar_borrowing_base: "borrowing_base_input",
-  monitoring: "monitoring_input"
+  ar_borrowing_base: "certified_borrowing_base_input",
+  monitoring: "certified_monitoring_input"
 };
 
 const DICTIONARY_HASH = CANONICAL_DICTIONARY_HASH;
@@ -706,11 +788,16 @@ export class GovernedWorkflow {
       definitionIds,
       certification.snapshot.asOfDate
     );
+    if (EXPECTED_INPUT_KIND[request.operation] !== undefined && request.purpose === undefined) {
+      throw workflowError("INVALID_INPUT", `${request.operation} requires an explicit governed purpose`);
+    }
     const loadedInput = this.#loadInputArtifact(
       principal.tenantId,
       request.operation,
       request.inputArtifactId,
-      certification
+      certification,
+      definitions,
+      request.purpose ?? null
     );
     const fields = requestedFields(request.operation, definitions);
     const decision = evaluatePolicy(this.#services.policy, {
@@ -771,7 +858,7 @@ export class GovernedWorkflow {
     const mappingFingerprint = controlDigestFingerprint(certification.mapping.mappingHash, "mapping hash");
     const schemaFingerprint = hashJson({ dictionaryHash: DICTIONARY_HASH, operation: request.operation, version: 1 });
     const envelope: ExecutionEnvelope = {
-      version: 2,
+      version: 3,
       operation: request.operation,
       certificationManifestId: request.certificationManifestId,
       definitionIds,
@@ -927,7 +1014,8 @@ export class GovernedWorkflow {
       payload.lineage.mappingDigest !== envelope.mappingDigest ||
       payload.lineage.dictionaryHash !== DICTIONARY_HASH ||
       payload.lineage.recipeHash !== envelope.recipeFingerprint ||
-      payload.lineage.inputArtifactHash !== (envelope.inputArtifact?.contentHash ?? null)
+      payload.lineage.inputArtifactHash !== (envelope.inputArtifact?.contentHash ?? null) ||
+      !resultInputCertificationMatches(payload, envelope)
     ) {
       throw workflowError("EXECUTION_FAILED", "Result artifact lineage did not verify");
     }
@@ -940,7 +1028,8 @@ export class GovernedWorkflow {
       manifest.createdBy !== job.requestedBy ||
       !manifest.artifacts.some(
         (artifact) => artifact.artifactId === stored.metadata.artifactId && artifact.contentHash === stored.metadata.contentHash
-      )
+      ) ||
+      !manifestInputCertificationMatches(manifest, envelope)
     ) {
       throw workflowError("EXECUTION_FAILED", "Result manifest did not verify");
     }
@@ -1020,6 +1109,60 @@ export class GovernedWorkflow {
       assertActivePrincipal(principal, this.#nowEpochSeconds(), 0);
       await this.#assertCurrentMembership(principal);
       this.#assertSubmissionAuthorization(claimed, envelope);
+      if (
+        claimed.datasetId === null ||
+        operationForTool(claimed.toolName) !== operation
+      ) {
+        throw workflowError("EXECUTION_FAILED", "Persisted job identity did not match its execution envelope");
+      }
+      const currentDecision = evaluatePolicy(this.#services.policy, {
+        principal,
+        toolName: TOOL_NAMES[operation],
+        dataset: { id: claimed.datasetId, tenantId },
+        fields: envelope.requestedFields,
+        ...(envelope.purpose === null ? {} : { purpose: envelope.purpose }),
+        nowEpochSeconds: this.#nowEpochSeconds()
+      });
+      this.#recordWorkerAuthorization(claimed, currentDecision);
+      try {
+        assertPermitDecision(currentDecision);
+      } catch {
+        throw workflowError("POLICY_DENIED", "Current policy denied queued execution");
+      }
+      assertSupportedObligations(currentDecision.obligations);
+      this.#throwIfCancelled(tenantId, claimed.jobId);
+
+      // A result manifest is a frozen, self-contained execution authority. Recover it
+      // after current identity/policy checks but before consulting mutable definitions
+      // or input-certification state, which may legitimately be superseded later.
+      const recovered = this.#recoverDurableResult(claimed, envelope, currentDecision);
+      if (recovered) {
+        verifiedDurableResultExists = true;
+        this.#persistMonitoringResultIfNeeded(tenantId, claimed, principal, recovered.payload);
+        const resultHandle = this.#bindResultHandle(principal, recovered.artifactId);
+        this.#services.jobs.heartbeat(
+          tenantId,
+          claimed.jobId,
+          workerId,
+          claimed.claimToken,
+          this.#workerLeaseSeconds
+        );
+        const completed = this.#services.jobs.complete(
+          tenantId,
+          claimed.jobId,
+          workerId,
+          claimed.claimToken,
+          resultHandle
+        );
+        return { operation, status: "succeeded", errorCode: completed.errorCode };
+      }
+      if (claimed.recoveryOnly) {
+        throw workflowError(
+          "EXECUTION_FAILED",
+          "The exhausted claim had no verified durable result to recover"
+        );
+      }
+
       const certification = this.#loadCertification(tenantId, envelope.certificationManifestId);
       const definitions = this.#loadDefinitions(
         tenantId,
@@ -1027,7 +1170,14 @@ export class GovernedWorkflow {
         envelope.definitionIds,
         certification.snapshot.asOfDate
       );
-      const inputArtifact = this.#reloadInputArtifact(tenantId, operation, envelope.inputArtifact, certification);
+      const inputArtifact = this.#reloadInputArtifact(
+        tenantId,
+        operation,
+        envelope.inputArtifact,
+        certification,
+        definitions,
+        envelope.purpose
+      );
       const parameterFingerprint = operationFingerprint(
         operation,
         envelope.certificationManifestId,
@@ -1048,21 +1198,6 @@ export class GovernedWorkflow {
       ) {
         throw workflowError("EXECUTION_FAILED", "Execution envelope no longer matches governed inputs");
       }
-      const currentDecision = evaluatePolicy(this.#services.policy, {
-        principal,
-        toolName: TOOL_NAMES[operation],
-        dataset: { id: certification.snapshot.snapshotId, tenantId },
-        fields: currentFields,
-        ...(envelope.purpose === null ? {} : { purpose: envelope.purpose }),
-        nowEpochSeconds: this.#nowEpochSeconds()
-      });
-      this.#recordWorkerAuthorization(claimed, currentDecision);
-      try {
-        assertPermitDecision(currentDecision);
-      } catch {
-        throw workflowError("POLICY_DENIED", "Current policy denied queued execution");
-      }
-      assertSupportedObligations(currentDecision.obligations);
       const nowEpochSeconds = this.#nowEpochSeconds();
       const remainingCredentialSeconds = principal.expiresAtEpochSeconds - nowEpochSeconds;
       if (remainingCredentialSeconds < 1) {
@@ -1110,34 +1245,6 @@ export class GovernedWorkflow {
       }
       this.#throwIfCancelled(tenantId, claimed.jobId);
 
-      const recovered = this.#recoverDurableResult(claimed, envelope, currentDecision);
-      if (recovered) {
-        verifiedDurableResultExists = true;
-        this.#persistMonitoringResultIfNeeded(tenantId, claimed, principal, recovered.payload);
-        const resultHandle = this.#bindResultHandle(principal, recovered.artifactId);
-        this.#services.jobs.heartbeat(
-          tenantId,
-          claimed.jobId,
-          workerId,
-          claimed.claimToken,
-          this.#workerLeaseSeconds
-        );
-        const completed = this.#services.jobs.complete(
-          tenantId,
-          claimed.jobId,
-          workerId,
-          claimed.claimToken,
-          resultHandle
-        );
-        return { operation, status: "succeeded", errorCode: completed.errorCode };
-      }
-      if (claimed.recoveryOnly) {
-        throw workflowError(
-          "EXECUTION_FAILED",
-          "The exhausted claim had no verified durable result to recover"
-        );
-      }
-
       const result = await this.#executeIsolated(
         {
           operation,
@@ -1155,8 +1262,7 @@ export class GovernedWorkflow {
         throw workflowError("RESULT_TOO_LARGE", "Result exceeded the authorized row bound");
       }
       const resultHash = hashJson(result);
-      const payload: ResultArtifactPayload = {
-        version: 2,
+      const payloadBase = {
         jobId: claimed.jobId,
         manifestId: claimed.jobId,
         operation,
@@ -1170,16 +1276,26 @@ export class GovernedWorkflow {
           purpose: envelope.purpose,
           obligations: verified.claims.obligations
         },
-        lineage: {
-          snapshotHash: certification.normalizedArtifact.contentHash,
-          mappingHash: mappingFingerprint,
-          mappingDigest: certification.mapping.mappingHash,
-          dictionaryHash: DICTIONARY_HASH,
-          recipeHash: definitions.recipeHash,
-          inputArtifactHash: envelope.inputArtifact?.contentHash ?? null
-        },
         result
       };
+      const lineage = {
+        snapshotHash: certification.normalizedArtifact.contentHash,
+        mappingHash: mappingFingerprint,
+        mappingDigest: certification.mapping.mappingHash,
+        dictionaryHash: DICTIONARY_HASH,
+        recipeHash: definitions.recipeHash,
+        inputArtifactHash: envelope.inputArtifact?.contentHash ?? null
+      };
+      const payload: ResultArtifactPayload = envelope.version === 2
+        ? { ...payloadBase, version: 2, lineage }
+        : {
+            ...payloadBase,
+            version: 3,
+            lineage: {
+              ...lineage,
+              inputCertification: envelope.inputArtifact?.certification ?? null
+            }
+          };
       const serialized = stableJson(payload);
       const prospectiveView: GovernedJobResultView = {
         operation,
@@ -1211,6 +1327,7 @@ export class GovernedWorkflow {
           definitionIds: envelope.definitionIds,
           definitionHashes: definitions.definitions.map((definition) => definition.documentHash),
           inputArtifactHash: envelope.inputArtifact?.contentHash ?? null,
+          inputCertification: envelope.inputArtifact?.certification ?? null,
           mappingDigest: certification.mapping.mappingHash,
           planId: verified.planId,
           policyFingerprint: verified.claims.policyFingerprint,
@@ -1647,7 +1764,9 @@ export class GovernedWorkflow {
       payload.lineage.dictionaryHash !== DICTIONARY_HASH ||
       payload.lineage.recipeHash !== envelope.recipeFingerprint ||
       payload.lineage.inputArtifactHash !== (envelope.inputArtifact?.contentHash ?? null) ||
-      manifest.queryHash !== payload.resultHash
+      !resultInputCertificationMatches(payload, envelope) ||
+      manifest.queryHash !== payload.resultHash ||
+      !manifestInputCertificationMatches(manifest, envelope)
     ) {
       throw workflowError("EXECUTION_FAILED", "Existing result artifact lineage did not verify");
     }
@@ -1918,7 +2037,9 @@ export class GovernedWorkflow {
     tenantId: string,
     operation: GovernedWorkflowOperation,
     artifactId: string | undefined,
-    certification: CertificationChain
+    certification: CertificationChain,
+    definitions: DefinitionBundle,
+    purpose: string | null
   ): LoadedInputArtifact | null {
     const expectedKind = EXPECTED_INPUT_KIND[operation];
     if (!expectedKind) {
@@ -1928,18 +2049,44 @@ export class GovernedWorkflow {
       return null;
     }
     if (!artifactId) throw workflowError("INVALID_INPUT", `${operation} requires an encrypted input artifact`);
+    if (purpose === null) throw workflowError("INVALID_INPUT", `${operation} requires an explicit governed purpose`);
     const loaded = this.#services.artifacts.getJson(tenantId, artifactId);
     if (loaded.metadata.kind !== expectedKind) {
       throw workflowError("INVALID_INPUT", `Input artifact must have kind ${expectedKind}`);
     }
-    validateOperationInput(operation, loaded.value, certification.snapshot);
+    if (operation !== "ar_borrowing_base" && operation !== "monitoring") {
+      throw workflowError("INVALID_INPUT", "Certified operation input is unsupported for this operation");
+    }
+    const verifier = new InputCertificationService({
+      control: this.#services.control,
+      definitions: this.#services.definitions,
+      artifacts: this.#services.artifacts,
+      inputCertifications: this.#services.inputCertifications
+    }, this.#clock);
+    let verified;
+    try {
+      verified = verifier.verify({
+        tenantId,
+        operation,
+        purpose,
+        artifact: loaded.metadata,
+        value: loaded.value,
+        chain: certification,
+        definitions: definitions.definitions,
+        now: this.#clock()
+      });
+    } catch {
+      throw workflowError("CERTIFICATION_REQUIRED", "Input population certification did not verify");
+    }
+    validateOperationInput(operation, verified.payload, certification.snapshot);
     return {
       reference: {
         artifactId: loaded.metadata.artifactId,
         contentHash: loaded.metadata.contentHash,
-        kind: loaded.metadata.kind
+        kind: loaded.metadata.kind,
+        certification: verified.summary
       },
-      value: loaded.value
+      value: verified.payload
     };
   }
 
@@ -1947,11 +2094,25 @@ export class GovernedWorkflow {
     tenantId: string,
     operation: GovernedWorkflowOperation,
     reference: InputArtifactReference | null,
-    certification: CertificationChain
+    certification: CertificationChain,
+    definitions: DefinitionBundle,
+    purpose: string | null
   ): LoadedInputArtifact | null {
-    if (!reference) return this.#loadInputArtifact(tenantId, operation, undefined, certification);
-    const loaded = this.#loadInputArtifact(tenantId, operation, reference.artifactId, certification);
-    if (!loaded || loaded.reference.contentHash !== reference.contentHash || loaded.reference.kind !== reference.kind) {
+    if (!reference) return this.#loadInputArtifact(tenantId, operation, undefined, certification, definitions, purpose);
+    const loaded = this.#loadInputArtifact(
+      tenantId,
+      operation,
+      reference.artifactId,
+      certification,
+      definitions,
+      purpose
+    );
+    if (
+      !loaded ||
+      loaded.reference.contentHash !== reference.contentHash ||
+      loaded.reference.kind !== reference.kind ||
+      stableJson(loaded.reference.certification ?? null) !== stableJson(reference.certification ?? null)
+    ) {
       throw workflowError("EXECUTION_FAILED", "Input artifact no longer matches the signed execution envelope");
     }
     return loaded;
@@ -2025,6 +2186,9 @@ export function executeGovernedAnalysis(
     });
   }
   if (operation === "ar_borrowing_base") {
+    if (!inputArtifact?.reference.certification) {
+      throw workflowError("CERTIFICATION_REQUIRED", "Borrowing-base input population is not certified");
+    }
     const policy = parseBorrowingBasePolicy(definitions.definitions[0]!);
     const input = parse(borrowingBaseInputSchema, inputArtifact?.value, "borrowing-base input");
     return sanitizeBorrowingBase(
@@ -2038,11 +2202,14 @@ export function executeGovernedAnalysis(
     );
   }
   const monitorDefinitions = definitions.definitions.map(parseMonitorDefinition);
+  if (!inputArtifact?.reference.certification) {
+    throw workflowError("CERTIFICATION_REQUIRED", "Monitoring input population is not certified");
+  }
   const input = parse(monitoringInputSchema, inputArtifact?.value, "monitoring input");
   return evaluateMonitoring({
     asOfDate: input.asOfDate,
     scope: input.scope as MonitoringScope,
-    dataQualityGate: certifiedMonitoringGate(certification, definitions),
+    dataQualityGate: certifiedMonitoringGate(certification, definitions, inputArtifact),
     monitorDefinitions,
     observations: input.observations as readonly MetricObservation[]
   });
@@ -2171,20 +2338,54 @@ function operationFingerprint(
   });
 }
 
+function resultInputCertificationMatches(
+  payload: ResultArtifactPayload,
+  envelope: ExecutionEnvelope
+): boolean {
+  if (payload.version === 2) {
+    return envelope.version === 2 && envelope.inputArtifact?.certification === undefined;
+  }
+  return (
+    envelope.version === 3 &&
+    stableJson(payload.lineage.inputCertification) ===
+      stableJson(envelope.inputArtifact?.certification ?? null)
+  );
+}
+
+function manifestInputCertificationMatches(
+  manifest: AnalysisManifest,
+  envelope: ExecutionEnvelope
+): boolean {
+  const parameters = objectValue(manifest.parameters, "result manifest parameters");
+  const stored = parameters.inputCertification ?? null;
+  return stableJson(stored) === stableJson(envelope.inputArtifact?.certification ?? null);
+}
+
 function certifiedMonitoringGate(
   certification: CertificationChain,
-  definitions: DefinitionBundle
+  definitions: DefinitionBundle,
+  inputArtifact: LoadedInputArtifact | null
 ): DataQualityGate {
+  const certifiedInput = inputArtifact?.reference.certification;
   return {
     status: "certified",
-    gateId: certification.manifest.manifestId,
+    gateId: certifiedInput?.lineageHash ?? certification.manifest.manifestId,
     snapshotId: certification.snapshot.snapshotId,
-    certifiedAt: certification.manifest.createdAt,
+    certifiedAt: certifiedInput?.certifiedAt ?? certification.manifest.createdAt,
     blockingFindingCount: certification.dataQuality.failedFindingCount,
     evidence: [
       { kind: "mapping", id: certification.mapping.mappingVersionId },
       { kind: "reconciliation", id: certification.reconciliation.reconciliationId },
       { kind: "source_artifact", id: certification.normalizedArtifact.artifactId },
+      ...(inputArtifact === null
+        ? []
+        : [
+            { kind: "source_artifact" as const, id: inputArtifact.reference.artifactId },
+            {
+              kind: "reconciliation" as const,
+              id: certifiedInput?.reconciliationId ?? certification.reconciliation.reconciliationId
+            }
+          ]),
       ...definitions.definitions.map((definition) => ({ kind: "policy" as const, id: definition.definitionId }))
     ]
   };

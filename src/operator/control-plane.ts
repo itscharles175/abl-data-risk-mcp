@@ -10,6 +10,7 @@ import { TextDecoder } from "node:util";
 
 import type { MonitoringAlertStore } from "../control/alerts.js";
 import type { ArtifactStore } from "../control/artifacts.js";
+import type { InputCertificationViewV1 } from "../control/input-certifications.js";
 import {
   DefinitionStoreError,
   type DefinitionStore,
@@ -35,6 +36,7 @@ import {
 } from "../services/file-ingestion.js";
 import type { SnapshotIngestionService } from "../services/ingestion.js";
 import type { SqlSnapshotExtractionService } from "../services/sql-snapshot-extraction.js";
+import type { InputCertificationService } from "../services/input-certification.js";
 import {
   alertListInputSchema,
   alertTransitionInputSchema,
@@ -52,6 +54,8 @@ import {
   OperatorInputError,
   parseStrict,
   putInputArtifactInputSchema,
+  inputCertificationCertifySchema,
+  inputCertificationProposeSchema,
   sqlExtractInputSchema,
   validateDefinitionDocument,
   validateInputArtifact,
@@ -89,6 +93,7 @@ type MembershipPort = Pick<TenantMembershipStore, "approve" | "propose" | "revok
 type AlertPort = Pick<MonitoringAlertStore, "listAlerts" | "listAuditEvents" | "transitionAlert">;
 type IngestionPort = Pick<SnapshotIngestionService, "certifyMappedSnapshot" | "registerDeliveredSnapshot">;
 type SqlExtractorPort = Pick<SqlSnapshotExtractionService, "extractAndRegister">;
+type InputCertificationPort = Pick<InputCertificationService, "propose" | "certify">;
 
 export interface OperatorControlPlaneDependencies {
   /**
@@ -102,6 +107,7 @@ export interface OperatorControlPlaneDependencies {
   readonly memberships: MembershipPort;
   readonly alerts: AlertPort;
   readonly ingestion: IngestionPort;
+  readonly inputCertification?: InputCertificationPort;
   readonly sqlExtractors?: ReadonlyMap<string, SqlExtractorPort>;
   readonly loadLoanTape?: typeof loadLoanTapeFile;
   readonly readJsonFile?: typeof readBoundedJsonFile;
@@ -206,6 +212,16 @@ export interface OperatorInputArtifactSummary {
   readonly contentHash: string;
   readonly byteLength: number;
   readonly auditSequence: number;
+}
+
+export interface OperatorInputCertificationSummary {
+  readonly inputId: string;
+  readonly inputKind: string;
+  readonly status: "proposed" | "certified";
+  readonly proposalHash: string;
+  readonly certifiedArtifactId?: string;
+  readonly envelopeHash?: string;
+  readonly lineageHash?: string;
 }
 
 export interface OperatorMembershipSummary {
@@ -539,6 +555,64 @@ export class OperatorControlPlane {
     };
   }
 
+  proposeInputCertification(inputValue: unknown): OperatorInputCertificationSummary {
+    const input = parseStrict(
+      inputCertificationProposeSchema,
+      inputValue,
+      "input certification proposal"
+    );
+    const service = this.#dependencies.inputCertification;
+    if (!service) {
+      throw new OperatorControlPlaneError(
+        "INVALID_INPUT",
+        "Input certification service is unavailable"
+      );
+    }
+    return inputCertificationSummary(
+      service.propose({
+        tenantId: input.tenantId,
+        inputId: input.inputId,
+        inputKind: input.inputKind,
+        candidateArtifactId: input.candidateArtifactId,
+        primaryCertificationManifestId: input.primaryCertificationManifestId,
+        definitionIds: input.definitionIds,
+        purpose: input.purpose,
+        declaredControls: {
+          rowCount: input.declaredControls.rowCount,
+          ...(input.declaredControls.balance === undefined
+            ? {}
+            : { balance: input.declaredControls.balance }),
+          ...(input.declaredControls.currency === undefined
+            ? {}
+            : { currency: input.declaredControls.currency })
+        },
+        idempotencyKey: input.idempotencyKey,
+        proposedBy: this.#principal.principalId
+      })
+    );
+  }
+
+  certifyInputCertification(inputValue: unknown): OperatorInputCertificationSummary {
+    const input = parseStrict(
+      inputCertificationCertifySchema,
+      inputValue,
+      "input certification approval"
+    );
+    const service = this.#dependencies.inputCertification;
+    if (!service) {
+      throw new OperatorControlPlaneError(
+        "INVALID_INPUT",
+        "Input certification service is unavailable"
+      );
+    }
+    return inputCertificationSummary(
+      service.certify({
+        ...input,
+        certifiedBy: this.#principal.principalId
+      })
+    );
+  }
+
   proposeMembership(inputValue: unknown): OperatorMembershipSummary {
     const input = parseStrict(membershipProposeInputSchema, inputValue, "membership proposal");
     return membershipSummary(
@@ -870,6 +944,24 @@ function definitionSummary(definition: GovernedDefinition): OperatorDefinitionSu
     effectiveFrom: definition.effectiveFrom,
     effectiveTo: definition.effectiveTo,
     documentHash: definition.documentHash
+  };
+}
+
+function inputCertificationSummary(
+  record: InputCertificationViewV1
+): OperatorInputCertificationSummary {
+  return {
+    inputId: record.inputId,
+    inputKind: record.inputKind,
+    status: record.status,
+    proposalHash: record.proposalHash,
+    ...(record.status === "certified"
+      ? {
+          certifiedArtifactId: record.certifiedArtifactId,
+          envelopeHash: record.envelopeHash,
+          lineageHash: record.lineageHash
+        }
+      : {})
   };
 }
 

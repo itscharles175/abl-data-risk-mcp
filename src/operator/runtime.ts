@@ -8,11 +8,13 @@ import { loadConfig, type SourceConfig } from "../config.js";
 import { MonitoringAlertStore } from "../control/alerts.js";
 import { ArtifactStore } from "../control/artifacts.js";
 import { DefinitionStore } from "../control/definitions.js";
+import { InputCertificationStore } from "../control/input-certifications.js";
 import { ControlStore } from "../control/store.js";
 import { isRestrictedColumn, tableKey } from "../infrastructure/sql/types.js";
 import { loadRuntimeConfiguration, type RuntimeEnvironment } from "../runtime/config.js";
 import { TenantMembershipStore } from "../security/membership-store.js";
 import { SnapshotIngestionService } from "../services/ingestion.js";
+import { InputCertificationService } from "../services/input-certification.js";
 import { TrustedPostgresSnapshotSource } from "../services/postgres-snapshot-source.js";
 import {
   SqlSnapshotExtractionService,
@@ -179,6 +181,7 @@ export function createOperatorRuntime(
   let definitions: DefinitionStore | undefined;
   let alerts: MonitoringAlertStore | undefined;
   let memberships: TenantMembershipStore | undefined;
+  let inputCertifications: InputCertificationStore | undefined;
   try {
     const sourceConfiguration = loadConfig(runtime.storage.sourceConfigPath);
     const sqlPolicies = loadSqlPolicies(environment.ABL_OPERATOR_SQL_POLICIES_FILE);
@@ -186,8 +189,17 @@ export function createOperatorRuntime(
     const definitionStore = definitions = new DefinitionStore(runtime.storage.controlDatabasePath);
     const alertStore = alerts = new MonitoringAlertStore(runtime.storage.controlDatabasePath);
     const membershipStore = memberships = new TenantMembershipStore(runtime.storage.controlDatabasePath);
+    const inputCertificationStore = inputCertifications = new InputCertificationStore(
+      runtime.storage.controlDatabasePath
+    );
     const artifacts = new ArtifactStore(runtime.storage.artifactRoot, runtime.artifactKeyRing);
     const ingestion = new SnapshotIngestionService(controlStore, artifacts);
+    const inputCertification = new InputCertificationService({
+      control: controlStore,
+      definitions: definitionStore,
+      artifacts,
+      inputCertifications: inputCertificationStore
+    });
     const sqlRuntime = buildSqlExtractors(
       sourceConfiguration.sources,
       sqlPolicies,
@@ -202,6 +214,7 @@ export function createOperatorRuntime(
       memberships: membershipStore,
       alerts: alertStore,
       ingestion,
+      inputCertification,
       sqlExtractors: sqlRuntime.extractors
     });
     let closed = false;
@@ -216,6 +229,7 @@ export function createOperatorRuntime(
           // Pool shutdown is best-effort; all local durable stores still close below.
         } finally {
           membershipStore.close();
+          inputCertificationStore.close();
           alertStore.close();
           definitionStore.close();
           controlStore.close();
@@ -225,6 +239,7 @@ export function createOperatorRuntime(
     };
   } catch (error) {
     memberships?.close();
+    inputCertifications?.close();
     alerts?.close();
     definitions?.close();
     control?.close();

@@ -14,6 +14,8 @@ export const OPERATOR_COMMANDS = [
   "definition-transition",
   "certify-snapshot",
   "put-input-artifact",
+  "input-certification-propose",
+  "input-certification-certify",
   "membership-propose",
   "membership-approve",
   "membership-revoke",
@@ -36,6 +38,8 @@ type OperatorControlPlanePort = Pick<
   | "proposeMapping"
   | "proposeMembership"
   | "putInputArtifact"
+  | "proposeInputCertification"
+  | "certifyInputCertification"
   | "revokeMembership"
   | "transitionAlert"
   | "transitionDefinition"
@@ -140,6 +144,10 @@ async function executeCommand(
       return controlPlane.certifySnapshot(request);
     case "put-input-artifact":
       return controlPlane.putInputArtifact(request);
+    case "input-certification-propose":
+      return controlPlane.proposeInputCertification(request);
+    case "input-certification-certify":
+      return controlPlane.certifyInputCertification(request);
     case "membership-propose":
       return controlPlane.proposeMembership(request);
     case "membership-approve":

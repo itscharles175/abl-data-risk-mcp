@@ -9,7 +9,7 @@ This is the handoff point for the next implementation session. It records what i
 1. Re-run `git status --short --branch`, `pnpm run check`, and `pnpm run test` before editing.
 2. Read this document and `docs/UPGRADE_IMPLEMENTATION.md` together.
 3. Use GitNexus impact/context before changing existing workflow, definition-store, operator, or remote-runtime symbols.
-4. Close the certified-sidecar integrity blocker first.
+4. The certified-sidecar integrity blocker is closed; begin with production-composition backlog item 1.
 5. Wire one vertical production slice at a time, with focused tests and a full verification run after each slice.
 6. Keep `.github/workflows` absent. All checks remain operator-run.
 
@@ -27,35 +27,39 @@ The repository contains additive, strict TypeScript implementations and tests fo
 
 These modules compile and have deterministic/conformance coverage. Presence in the repository does not mean every module is composed into the current production runtime.
 
-## First blocker: certified sidecar enforcement
+## Completed slice: certified sidecar enforcement
 
-Severity: high integrity / release blocker.
+Status: closed in source and local verification on 2026-08-12.
 
-`GovernedWorkflow` currently accepts `borrowing_base_input` and `monitoring_input` artifacts after checking tenant, kind, snapshot ID, and as-of date. It does not call the new `assertCertifiedAnalysisInputs` gate or otherwise prove that each sidecar population has a published DQ result, passing reconciliation, matching population hash, and certification evidence. Existing workflow fixtures demonstrate that arbitrary sidecars execute successfully and can emit alerts.
+`GovernedWorkflow` now accepts only additive `certified_borrowing_base_input` and `certified_monitoring_input` artifacts for new execution. Raw v1 artifacts remain encrypted and readable for historical/operator inspection but cannot enqueue or reach either engine.
 
-Required next change:
+Implemented controls:
 
-- define an additive input-artifact envelope containing payload plus `AnalysisInputLineageV1`;
-- verify its canonical lineage hash and call `assertCertifiedAnalysisInputs` at submission and worker reload;
-- bind tenant, canonical snapshot hash/content hash, mapping application/hash, sidecar population hash, row count, purpose, as-of date, and governed definition hashes;
-- persist those references in the signed execution envelope and result manifest;
-- keep old artifacts readable for historical inspection, but reject them for new borrowing-base or monitoring execution;
-- update the operator artifact command so it can create only a fully certified envelope, or provide a separate maker/checker certification operation;
-- add negative tests for missing, blocked, cross-tenant, cross-snapshot, stale, tampered, and reconciliation-mismatched lineage.
+- strict canonical `CertifiedOperationInputV1` envelopes contain the legacy payload plus `AnalysisInputLineageV1`, payload and envelope hashes;
+- `InputCertificationStore` durably locks proposal evidence and enforces immutable records, exact idempotency, tenant scope, schema attestation, and different maker/checker identities;
+- `InputCertificationService` builds the primary v1 compatibility bridge server-side, derives sidecar DQ and exact reconciliation evidence, assembles the lineage/envelope, and revalidates authoritative state at submission and worker reload;
+- v3 execution/result envelopes bind the artifact, lineage, derivation, primary and sidecar population/certification hashes; submission, worker reload, and crash recovery revalidate authoritative input evidence, while completed historical reads use the frozen encrypted result plus immutable manifest so later definition activation cannot invalidate prior results;
+- monitoring certification requires one unique observation for every governed metric, an exact reference to the primary normalized population, and only allowlisted supplementary mapping, reconciliation, artifact, or policy references; monitoring alerts name the sidecar reconciliation and certification time;
+- operator commands `input-certification-propose` and `input-certification-certify` derive actor identity from the trusted process boundary and never accept actor fields;
+- certification and proposal retries use durable actor-scoped idempotency receipts, even after a governed definition is retired;
+- legacy, purpose-mismatched, tampered, self-hashed fake, deleted-evidence, missing/duplicate metric, and direct-worker bypass cases fail closed; a failed monitoring reload emits no alert;
+- queued v2 stratification/vintage envelopes continue to produce v2 results and remain retrievable and crash-recoverable after the upgrade.
 
-Do not weaken the contract by accepting a caller boolean such as `certified: true`.
+There is no caller boolean such as `certified: true`; canonical self-hashes alone are not authority.
 
 ## Production-composition backlog
 
-After the sidecar gate, close these vertical slices in order:
+Continue with these vertical slices in order:
 
 1. Extend the durable governed-definition store and operator schemas additively for source contracts, mapping specs/applications, metrics, cohorts, bins, reconciliations, entity resolution, reports, scenarios, and covenants. Use a new component migration and preserve v1 rows.
-2. Compose the surveillance engine and ABL-v2 engine into signed governed jobs, with operation-registry metadata and complete result-envelope accounting.
+2. Compose the surveillance engine and ABL-v2 engine into signed governed jobs, with operation-registry metadata and complete result-envelope accounting. Add durable metric-run records so monitoring values are derived from governed metric populations rather than merely population-anchored external observations.
 3. Construct the investigation/report workflow in `remote-cli`, then enable the additive analyst MCP tools with real policy, audit, artifact, and lifecycle dependencies. The tool registry alone is not a production capability.
 4. Replace the BFF fixture adapter with a tenant-aware authenticated control API; add durable sessions, tenant-scoped approval records, audit receipts, and browser E2E against that API.
 5. Connect pipeline state, correction/backfill handling, monitoring-v2, report generation, and the transactional notification outbox. Keep delivery destinations server-governed.
 6. Add production XLSX/Parquet decoders behind the hardened ports and certify real PostgreSQL/object-storage adapters with operator-provided environments.
 7. Implement the mutually authenticated outbound client-VPC connector service and compose shared PostgreSQL/object-artifact repositories into multi-replica APIs/workers.
+
+The external-sidecar bridge intentionally does not infer facility-specific entity relationships. Before customer production approval, each source contract must define the applicable receivable/debtor/facility crosswalk and independent tie-out controls; the platform must verify those governed controls rather than inventing a generic loan-to-receivable relationship. Monitoring observations now carry an exact normalized-population reference, but production monitoring still requires durable metric-run derivation evidence for each value.
 
 ## External gates that code cannot self-certify
 
@@ -68,13 +72,13 @@ After the sidecar gate, close these vertical slices in order:
 
 ## Verification commands
 
-Checkpoint evidence captured on 2026-08-12:
+Latest evidence captured on 2026-08-12:
 
-- `pnpm run verify`: passed; 305 root tests passed, one opt-in live PostgreSQL test skipped, and all 21 platform tests passed; both strict TypeScript configurations and production builds passed;
+- `pnpm run verify`: passed; 335 root tests passed, one opt-in live PostgreSQL test skipped, and all 21 platform tests passed; both strict TypeScript configurations and production builds passed;
 - `pnpm run verify:integration`: passed local conformance; 68 tests passed, one live PostgreSQL test skipped, and all 21 platform tests passed; external services were not run;
 - `pnpm run verify:security`: passed local adversarial checks; 123 tests passed and one opt-in test skipped; external tenant/RLS/egress/WORM gates were not run;
 - `pnpm run audit:prod`: no known production dependency vulnerabilities;
-- GitNexus: index current, zero dependency cycles, staged change classified `critical` because this is a 118-file greenfield platform expansion affecting 108 modeled flows. That blast radius received independent domain, runtime, and adversarial review; the unresolved sidecar finding is recorded above rather than waived;
+- GitNexus pre-edit impact was LOW for the input loaders, operation fingerprint, worker entry, operator methods, runtime composition, result retrieval, and recovery. The rebuilt PDG contains 28,423 nodes, 66,966 edges, and no import cycles; staged change detection classified this 21-file/278-symbol slice `critical` across 26 modeled flows because governed start/process/recovery paths are deliberately affected. The focused 38-test workflow/recovery suite and an independent read-only adversarial audit found no remaining blocker;
 - console fixture browser QA covered sign-in, role-filtered navigation, source profiling, responsive layout, and a clean browser console;
 - `.github/workflows` contains no tracked workflow files.
 

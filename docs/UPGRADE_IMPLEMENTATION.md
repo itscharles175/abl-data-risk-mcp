@@ -25,11 +25,12 @@ Implemented or conformance-backed:
 - repository ports plus in-memory conformance implementations for control, definitions, memberships, jobs, alerts, security, artifacts, and audit;
 - bounded mapping-v2 executor and operation-registry contracts;
 - local stratification-v2 and vintage-v2 previews materialize bounded allowlisted rows and invoke the same deterministic snapshot engines used by governed jobs, with identical golden hashes;
+- maker/checker-certified borrowing-base and monitoring input populations, strict canonical envelopes, authoritative submission/worker/recovery revalidation, mandatory normalized-population evidence for monitoring, and v3 result lineage; completed historical reads rely on their frozen encrypted result and immutable manifest, while raw legacy sidecars remain readable but cannot execute;
 - v1 sources remain present; the upgrade is additive rather than an in-place historical rewrite.
 
 Not yet production-certified:
 
-- **Release blocker:** new borrowing-base and monitoring execution still accepts legacy sidecar payloads without enforcing the additive certified-population lineage contract. The exact remediation is the first item in `docs/UPGRADE_CHECKPOINT.md`;
+- richer source-contract-specific entity/control crosswalks between independently certified external sidecars and canonical snapshots; the current bridge binds snapshot, mapping, governed definitions, exact controls, population hashes, purpose, DQ, reconciliation, and normalized-population evidence but does not infer facility-specific receivable-to-loan relationships or yet persist a derived metric-run for every monitoring value;
 - migration of an existing customer control plane into the v2 contracts;
 - live shared persistence and recovery of historical bundles;
 - an independent production replay of customer certifications after dictionary/mapping upgrades.
@@ -122,7 +123,7 @@ Boundary:
 
 The scripts intentionally report `local_pass_external_not_run` when optional external gates are skipped. That outcome must never be represented as production certification or deployment approval.
 
-The exact next-session order, including the certified-sidecar blocker and production-composition backlog, is maintained in `docs/UPGRADE_CHECKPOINT.md`.
+The exact next-session order, including the closed certified-sidecar slice and remaining production-composition backlog, is maintained in `docs/UPGRADE_CHECKPOINT.md`.
 
 ## Preserved boundaries
 

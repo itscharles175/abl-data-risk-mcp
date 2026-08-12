@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { MonitoringAlertStore } from "./control/alerts.js";
 import { ArtifactStore } from "./control/artifacts.js";
 import { DefinitionStore } from "./control/definitions.js";
+import { InputCertificationStore } from "./control/input-certifications.js";
 import { JobStore, type ReapedJobRecord } from "./control/jobs.js";
 import { ControlStore, type JsonValue } from "./control/store.js";
 import { loadConfig } from "./config.js";
@@ -179,6 +180,8 @@ async function initializeRemoteRuntime(configuration: RuntimeConfiguration): Pro
     storeClosers.push(() => securityState.close());
     const monitoringAlerts = new MonitoringAlertStore(configuration.storage.controlDatabasePath);
     storeClosers.push(() => monitoringAlerts.close());
+    const inputCertifications = new InputCertificationStore(configuration.storage.controlDatabasePath);
+    storeClosers.push(() => inputCertifications.close());
     const tenantMemberships = new TenantMembershipStore(configuration.storage.controlDatabasePath);
     storeClosers.push(() => tenantMemberships.close());
     const artifacts = new ArtifactStore(
@@ -198,6 +201,7 @@ async function initializeRemoteRuntime(configuration: RuntimeConfiguration): Pro
         artifacts,
         jobs,
         monitoringAlerts,
+        inputCertifications,
         securityState,
         tenantMembershipResolver: tenantMemberships,
         policy: configuration.policy,

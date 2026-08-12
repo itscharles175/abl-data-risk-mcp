@@ -187,6 +187,37 @@ export const putInputArtifactInputSchema = z
   })
   .strict();
 
+const inputDeclaredControlsSchema = z
+  .object({
+    rowCount: z.number().int().nonnegative(),
+    balance: decimalSchema.optional(),
+    currency: z.string().regex(/^[A-Z]{3}$/).optional()
+  })
+  .strict()
+  .refine((value) => value.balance === undefined || value.currency !== undefined);
+
+export const inputCertificationProposeSchema = z
+  .object({
+    tenantId: operatorIdentifierSchema,
+    inputId: operatorIdentifierSchema,
+    inputKind: z.enum(["borrowing_base", "monitoring"]),
+    candidateArtifactId: z.string().regex(/^[a-f0-9]{64}$/),
+    primaryCertificationManifestId: operatorIdentifierSchema,
+    definitionIds: z.array(documentIdentifierSchema).min(1).max(128),
+    purpose: boundedTextSchema.max(512),
+    declaredControls: inputDeclaredControlsSchema,
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+export const inputCertificationCertifySchema = z
+  .object({
+    tenantId: operatorIdentifierSchema,
+    inputId: operatorIdentifierSchema,
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
 export const membershipProposeInputSchema = z
   .object({
     membershipId: operatorIdentifierSchema,
@@ -503,6 +534,8 @@ export type DefinitionProposeInput = z.infer<typeof definitionProposeInputSchema
 export type DefinitionTransitionInput = z.infer<typeof definitionTransitionInputSchema>;
 export type CertifySnapshotInput = z.infer<typeof certifySnapshotInputSchema>;
 export type PutInputArtifactInput = z.infer<typeof putInputArtifactInputSchema>;
+export type InputCertificationProposeRequest = z.infer<typeof inputCertificationProposeSchema>;
+export type InputCertificationCertifyRequest = z.infer<typeof inputCertificationCertifySchema>;
 export type MembershipProposeInput = z.infer<typeof membershipProposeInputSchema>;
 export type MembershipChangeInput = z.infer<typeof membershipChangeInputSchema>;
 export type AlertListInput = z.infer<typeof alertListInputSchema>;
