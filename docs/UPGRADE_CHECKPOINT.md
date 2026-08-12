@@ -9,7 +9,7 @@ This is the handoff point for the next implementation session. It records what i
 1. Re-run `git status --short --branch`, `pnpm run check`, and `pnpm run test` before editing.
 2. Read this document and `docs/UPGRADE_IMPLEMENTATION.md` together.
 3. Use GitNexus impact/context before changing existing workflow, definition-store, operator, or remote-runtime symbols.
-4. The certified-sidecar integrity blocker is closed; begin with production-composition backlog item 1.
+4. The certified-sidecar integrity blocker and the additive definition/longitudinal/metric-evidence foundation are closed; begin with production-composition backlog item 1.
 5. Wire one vertical production slice at a time, with focused tests and a full verification run after each slice.
 6. Keep `.github/workflows` absent. All checks remain operator-run.
 
@@ -23,7 +23,8 @@ The repository contains additive, strict TypeScript implementations and tests fo
 - portfolio-surveillance definitions and deterministic metric families, approved entity resolution, cell lineage/suppression, multi-component ABL-v2, counterfactuals, cash reconciliation, and signed aggregate report packs;
 - governed investigation persistence, masking, bounded cursors, disclosure evidence, adaptive-query controls, and an additive MCP analyst-tool registry;
 - pipeline state, monitoring-v2, governed notification contracts, hybrid connector plans, XLSX/Parquet/object-storage preflight adapters, PostgreSQL certification harnesses, shared PostgreSQL coordination primitives, immutable encrypted object artifacts, and privacy-safe telemetry;
-- operator-run integration, security, and release orchestration with explicit opt-in external gates.
+- operator-run integration, security, and release orchestration with explicit opt-in external gates;
+- an additive governed-definition v2 component and frozen resolver, correction-aware longitudinal certification bundles, governed metric projections, and maker/checker metric-run evidence derived only from signed result-cell authority.
 
 These modules compile and have deterministic/conformance coverage. Presence in the repository does not mean every module is composed into the current production runtime.
 
@@ -51,13 +52,14 @@ There is no caller boolean such as `certified: true`; canonical self-hashes alon
 
 Continue with these vertical slices in order:
 
-1. Extend the durable governed-definition store and operator schemas additively for source contracts, mapping specs/applications, metrics, cohorts, bins, reconciliations, entity resolution, reports, scenarios, and covenants. Use a new component migration and preserve v1 rows.
-2. Compose the surveillance engine and ABL-v2 engine into signed governed jobs, with operation-registry metadata and complete result-envelope accounting. Add durable metric-run records so monitoring values are derived from governed metric populations rather than merely population-anchored external observations.
-3. Construct the investigation/report workflow in `remote-cli`, then enable the additive analyst MCP tools with real policy, audit, artifact, and lifecycle dependencies. The tool registry alone is not a production capability.
-4. Replace the BFF fixture adapter with a tenant-aware authenticated control API; add durable sessions, tenant-scoped approval records, audit receipts, and browser E2E against that API.
-5. Connect pipeline state, correction/backfill handling, monitoring-v2, report generation, and the transactional notification outbox. Keep delivery destinations server-governed.
-6. Add production XLSX/Parquet decoders behind the hardened ports and certify real PostgreSQL/object-storage adapters with operator-provided environments.
-7. Implement the mutually authenticated outbound client-VPC connector service and compose shared PostgreSQL/object-artifact repositories into multi-replica APIs/workers.
+1. Before exposing v2 governance, add an append-only, audited `withdrawn` terminal transition for abandoned `proposed`, `validated`, or `approved` versions; it must remain non-executable and outside rollback-retirement dependency checks. Then wire the additive v2 definition store/resolver into trusted operator commands and runtime construction. The independent component already governs source contracts, mapping specs, methodology bundles, borrowing-base policies, metrics, metric projections, cohorts, bins, reconciliations, entity resolution, reports, scenarios, and covenants while preserving v1 rows; it is intentionally not yet reachable through the operator or remote runtime.
+2. Compose the surveillance engine into signed governed jobs first, using the correction-aware `LongitudinalCertificationBundleV1`, frozen v2 definition references, operation-registry metadata, v4 additive envelopes, and complete result accounting. Then add ABL-v2 as a separate certified-input operation.
+3. Implement the production `MetricRunAuthorityResolver` over signed surveillance result artifacts/manifests and expose only the IDs-only `MetricRunEvidenceService` creation/approval path. Bind monitoring-v2 observations to exact certified metric-run IDs; never expose the internal metric-run store as an authority.
+4. Construct the investigation/report workflow in `remote-cli`, then enable the additive analyst MCP tools with real policy, audit, artifact, and lifecycle dependencies. The tool registry alone is not a production capability.
+5. Replace the BFF fixture adapter with a tenant-aware authenticated control API; add durable sessions, tenant-scoped approval records, audit receipts, and browser E2E against that API.
+6. Connect pipeline state, correction/backfill handling, monitoring-v2, report generation, and the transactional notification outbox. Keep delivery destinations server-governed.
+7. Add production XLSX/Parquet decoders behind the hardened ports and certify real PostgreSQL/object-storage adapters with operator-provided environments.
+8. Implement the mutually authenticated outbound client-VPC connector service and compose shared PostgreSQL/object-artifact repositories into multi-replica APIs/workers.
 
 The external-sidecar bridge intentionally does not infer facility-specific entity relationships. Before customer production approval, each source contract must define the applicable receivable/debtor/facility crosswalk and independent tie-out controls; the platform must verify those governed controls rather than inventing a generic loan-to-receivable relationship. Monitoring observations now carry an exact normalized-population reference, but production monitoring still requires durable metric-run derivation evidence for each value.
 
@@ -74,11 +76,12 @@ The external-sidecar bridge intentionally does not infer facility-specific entit
 
 Latest evidence captured on 2026-08-12:
 
-- `pnpm run verify`: passed; 335 root tests passed, one opt-in live PostgreSQL test skipped, and all 21 platform tests passed; both strict TypeScript configurations and production builds passed;
+- `pnpm run verify`: passed; 394 root tests passed, one opt-in live PostgreSQL test skipped, and all 21 platform tests passed; both strict TypeScript configurations and production builds passed;
 - `pnpm run verify:integration`: passed local conformance; 68 tests passed, one live PostgreSQL test skipped, and all 21 platform tests passed; external services were not run;
 - `pnpm run verify:security`: passed local adversarial checks; 123 tests passed and one opt-in test skipped; external tenant/RLS/egress/WORM gates were not run;
 - `pnpm run audit:prod`: no known production dependency vulnerabilities;
-- GitNexus pre-edit impact was LOW for the input loaders, operation fingerprint, worker entry, operator methods, runtime composition, result retrieval, and recovery. The rebuilt PDG contains 28,423 nodes, 66,966 edges, and no import cycles; staged change detection classified this 21-file/278-symbol slice `critical` across 26 modeled flows because governed start/process/recovery paths are deliberately affected. The focused 38-test workflow/recovery suite and an independent read-only adversarial audit found no remaining blocker;
+- the focused definition/resolver/longitudinal/metric-evidence suite passed 59/59, and two independent read-only adversarial reviews found no remaining blocker. The reviews covered tenant substitution, lifecycle actor forgery, activated-only execution, timeline fallback/overlap, rollback-target retirement races, correction-chain omission/time travel, authority drift, ratio evidence, coverage bounds, clock regression, and idempotent historical response replay;
+- the final GitNexus PDG rebuild contains 31,543 nodes, 73,534 edges, and 238 modeled flows; the import-cycle check reports zero cycles. Staged impact detection classified the 19-file, 457-symbol foundation slice `critical` across 25 modeled flows, as expected for new durable governance/evidence stores and shared contract validators; the full, focused, integration, security, schema-adversarial, and independent review gates above cover that blast radius;
 - console fixture browser QA covered sign-in, role-filtered navigation, source profiling, responsive layout, and a clean browser console;
 - `.github/workflows` contains no tracked workflow files.
 

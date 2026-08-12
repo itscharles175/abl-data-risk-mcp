@@ -914,6 +914,10 @@ function validateInput(input: CalculateBorrowingBaseV2Input): void {
   if ((input.ticklers?.length ?? 0) > 1_000) throw new Error("Too many document ticklers");
 }
 
+export function validateBorrowingBasePolicyV2(policy: BorrowingBasePolicyV2): void {
+  validatePolicy(policy);
+}
+
 function validatePolicy(policy: BorrowingBasePolicyV2): void {
   exactKeys(policy, "borrowing-base policy", [
     "schemaVersion",

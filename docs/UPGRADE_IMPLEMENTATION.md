@@ -22,6 +22,9 @@ Implemented or conformance-backed:
 - additive `SourceContractV1`, `DatasetSnapshotV2`, `MappingSpecV2`, `MappingApplicationV1`, certified-lineage, canonical hashing, dictionary-v2, and immutable bundle contracts;
 - reusable mapping specifications separated from snapshot-specific applications;
 - historical bundle/replay contracts and certified-population references;
+- an independent immutable governed-definition v2 component with strict semantic versions, semantic diffs and impact previews, maker/checker lifecycle evidence, activated-only historical frozen resolution, fail-closed rollback-target retirement, and additive kinds for source/mapping/methodology/borrowing-base/metric/projection/cohort/bin/reconciliation/entity/report/scenario/covenant governance;
+- correction-aware longitudinal certification bundles that bind one dataset, source contract, governed scope, delivery identity, full replacement chain, dictionary, mapping runtime/compiler, normalized population, and frozen methodology;
+- governed metric projections and durable maker/checker metric-run evidence whose public creation request contains identifiers only; every value, unit, scope, numerator, denominator, coverage figure, source, and population hash is resolved from a frozen signed result cell, with ratio operands, certified-population coverage, tenant identity, and chronology verified independently;
 - repository ports plus in-memory conformance implementations for control, definitions, memberships, jobs, alerts, security, artifacts, and audit;
 - bounded mapping-v2 executor and operation-registry contracts;
 - local stratification-v2 and vintage-v2 previews materialize bounded allowlisted rows and invoke the same deterministic snapshot engines used by governed jobs, with identical golden hashes;
@@ -32,7 +35,9 @@ Not yet production-certified:
 
 - richer source-contract-specific entity/control crosswalks between independently certified external sidecars and canonical snapshots; the current bridge binds snapshot, mapping, governed definitions, exact controls, population hashes, purpose, DQ, reconciliation, and normalized-population evidence but does not infer facility-specific receivable-to-loan relationships or yet persist a derived metric-run for every monitoring value;
 - migration of an existing customer control plane into the v2 contracts;
-- live shared persistence and recovery of historical bundles;
+- an audited terminal `withdrawn` lifecycle for abandoned pending v2 definitions before any production administration surface is enabled;
+- durable persistence and runtime composition of longitudinal bundles (the strict builder/verifier exists, but no production repository or job envelope currently owns it);
+- production implementation of the metric-result-cell authority over signed surveillance artifacts and binding of monitoring-v2 to certified metric-run IDs;
 - an independent production replay of customer certifications after dictionary/mapping upgrades.
 
 ### Release 1 — administration and onboarding console
