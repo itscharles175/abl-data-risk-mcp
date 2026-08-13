@@ -252,14 +252,14 @@ export class LifecycleSnapshotCertificationDefinitionAuthorityV1
         },
         sourceContract: {
           raw: definition.sourceContract,
-          execution: source.reference
+          execution: definition.sourceContractExecution
         },
         scopeBinding: {
           raw: scopeDocument,
-          execution: scope.reference
+          execution: definition.scopeBindingExecution
         },
         mapping: {
-          execution: mapping.reference,
+          execution: definition.mappingExecution,
           activation: mapping.activationEvidence
         },
         runtime: {

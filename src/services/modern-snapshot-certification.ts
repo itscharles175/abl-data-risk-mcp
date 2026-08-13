@@ -345,7 +345,8 @@ export interface ModernSnapshotCertificationServiceDependencies {
   readonly snapshots: Pick<ImmutableRepositoryPort<DatasetSnapshotV2>, "get">;
   readonly receipts: ModernSnapshotExtractionReceiptAuthorityV1;
   readonly sourceDeliveries: GovernedSourceDeliveryCaptureAuthorityV1;
-  readonly certifiedEvidence: Pick<
+  /** Required only by legacy trusted-import certification. Lifecycle mode writes V2 evidence exclusively. */
+  readonly certifiedEvidence?: Pick<
     ImmutableRepositoryPort<CertifiedSnapshotEvidenceRecordV1>,
     "get" | "put"
   >;
@@ -449,9 +450,12 @@ export class ModernSnapshotCertificationService {
     const lifecycleEvidence = lifecycleDefinitions === undefined
       ? undefined
       : requiredLifecycleEvidence(this.#dependencies.certifiedEvidenceV2);
-    const existing = lifecycleDefinitions === undefined
-      ? await this.#dependencies.certifiedEvidence.get(actor.tenantId, request.certificationManifestId)
+    const legacyEvidence = lifecycleDefinitions === undefined
+      ? requiredLegacyEvidence(this.#dependencies.certifiedEvidence)
       : undefined;
+    const existing = legacyEvidence === undefined
+      ? undefined
+      : await legacyEvidence.get(actor.tenantId, request.certificationManifestId);
     const existingV2 = lifecycleDefinitions === undefined
       ? undefined
       : await requiredLifecycleEvidence(lifecycleEvidence).get(
@@ -759,7 +763,7 @@ export class ModernSnapshotCertificationService {
       }
     }
     try {
-      const put = await this.#dependencies.certifiedEvidence.put(evidence, {
+      const put = await requiredLegacyEvidence(this.#dependencies.certifiedEvidence).put(evidence, {
         tenantId: actor.tenantId,
         actorId: actor.actorId,
         idempotencyKey: request.idempotencyKey
@@ -787,7 +791,7 @@ export class ModernSnapshotCertificationService {
         error instanceof RepositoryError &&
         (error.code === "ALREADY_EXISTS" || error.code === "IDEMPOTENCY_CONFLICT")
       ) {
-        const raced = await this.#dependencies.certifiedEvidence.get(
+        const raced = await requiredLegacyEvidence(this.#dependencies.certifiedEvidence).get(
           actor.tenantId,
           request.certificationManifestId
         );
@@ -1564,6 +1568,18 @@ function requiredLifecycleEvidence(
     fail(
       "INTEGRITY_FAILURE",
       "Lifecycle-governed certification requires its dedicated immutable V2 evidence repository"
+    );
+  }
+  return evidence;
+}
+
+function requiredLegacyEvidence(
+  evidence: ModernSnapshotCertificationServiceDependencies["certifiedEvidence"]
+): Pick<ImmutableRepositoryPort<CertifiedSnapshotEvidenceRecordV1>, "get" | "put"> {
+  if (evidence === undefined) {
+    fail(
+      "INTEGRITY_FAILURE",
+      "Legacy certification requires its immutable V1 evidence repository"
     );
   }
   return evidence;

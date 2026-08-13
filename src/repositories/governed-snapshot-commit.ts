@@ -115,3 +115,16 @@ export interface GovernedDatasetSnapshotCommitRepositoryV1
     context: RepositoryWriteContext
   ): Promise<RepositoryPutResult<DatasetSnapshotV2>>;
 }
+
+/**
+ * Read-only authority for the immutable capture-commit lineage of a governed
+ * dataset snapshot.  A missing snapshot and a legacy (non-governed) snapshot
+ * are intentionally indistinguishable to callers: neither has governed
+ * capture lineage that can safely be published.
+ */
+export interface GovernedSnapshotCaptureLineageReadPortV1 {
+  getGovernedCaptureLineage(
+    tenantId: string,
+    snapshotId: string
+  ): Promise<GovernedSnapshotCommitLineageV1 | undefined>;
+}

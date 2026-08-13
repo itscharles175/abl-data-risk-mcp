@@ -17,6 +17,7 @@ import {
 import {
   parseGovernedSnapshotCommitLineageV1,
   type GovernedDatasetSnapshotCommitRepositoryV1,
+  type GovernedSnapshotCaptureLineageReadPortV1,
   type GovernedSnapshotCommitLineageV1
 } from "./governed-snapshot-commit.js";
 import { migrateSqliteComponent, type SqliteComponentMigration } from "../infrastructure/sqlite-component-schema.js";
@@ -539,11 +540,22 @@ abstract class SqliteImmutableSurveillanceRepository<T extends TenantRecord>
   #assertOpen(): void {
     if (this.#closed) throw new RepositoryError("INVALID_ARGUMENT", "Repository is closed");
   }
+
+  /**
+   * Subclasses may use the connection only after independently reading their
+   * immutable record through `get`, which performs the full canonical
+   * record/index validation path.  The connection is deliberately not
+   * exposed outside repository subclasses.
+   */
+  protected verifiedReadDatabase(): DatabaseSync {
+    this.#assertOpen();
+    return this.#database;
+  }
 }
 
 export class SqliteDatasetSnapshotV2Repository
   extends SqliteImmutableSurveillanceRepository<DatasetSnapshotV2>
-  implements GovernedDatasetSnapshotCommitRepositoryV1
+  implements GovernedDatasetSnapshotCommitRepositoryV1, GovernedSnapshotCaptureLineageReadPortV1
 {
   constructor(databasePath: string, options: SqliteSurveillanceRepositoryOptions = {}) {
     super(databasePath, datasetSnapshotConfiguration(), options);
@@ -560,6 +572,37 @@ export class SqliteDatasetSnapshotV2Repository
       afterInsert: (database, stored) => insertGovernedSnapshotLineage(database, stored, lineage),
       assertReplay: (database, stored) => assertExactGovernedSnapshotLineage(database, stored, lineage)
     });
+  }
+
+  async getGovernedCaptureLineage(
+    tenantIdValue: string,
+    snapshotIdValue: string
+  ): Promise<GovernedSnapshotCommitLineageV1 | undefined> {
+    const tenantId = identifier(tenantIdValue, "tenant id");
+    const snapshotId = identifier(snapshotIdValue, "snapshot id");
+    const snapshot = await this.get(tenantId, snapshotId);
+    if (!snapshot) return undefined;
+
+    const database = this.verifiedReadDatabase();
+    // `get` has already verified the snapshot record, all snapshot indexes,
+    // and its lineage. Re-run the lineage verifier before returning the
+    // parsed payload so this read cannot be weakened by a future change to
+    // the generic repository read path.
+    verifyStoredSnapshotLineage(database, snapshot);
+    const row = readSnapshotLineage(database, tenantId, snapshotId);
+    if (!row) {
+      throw new RepositoryError("INTEGRITY_FAILURE", "Dataset snapshot is missing its atomic lineage row");
+    }
+    if (row.lineage_kind === "legacy") return undefined;
+    if (!row.lineage_json) {
+      throw new RepositoryError("INTEGRITY_FAILURE", "Governed dataset snapshot lineage is incomplete");
+    }
+    try {
+      return parseGovernedSnapshotCommitLineageV1(JSON.parse(row.lineage_json) as unknown);
+    } catch (error) {
+      if (error instanceof RepositoryError) throw error;
+      throw integrity("Stored governed snapshot lineage failed integrity verification", error);
+    }
   }
 }
 

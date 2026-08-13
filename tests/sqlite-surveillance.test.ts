@@ -281,6 +281,83 @@ test("governed capture CAS scopes originals by facility population and permits o
   secondConnection.close();
 });
 
+test("governed capture lineage reads are tenant-fenced, verified, and reopen-safe", async () => {
+  const path = databasePath();
+  const repository = new SqliteDatasetSnapshotV2Repository(path);
+  const governed = snapshot("governed-lineage-read", "2026-07-31");
+  const lineage = governedLineage(
+    governed,
+    "dataset-lineage-read",
+    "facility-lineage-read",
+    "binding-lineage-read",
+    "delivery-lineage-read"
+  );
+  await repository.commitGovernedCapture(governed, lineage, context("governed-lineage-read"));
+  await repository.put(snapshot("legacy-lineage-read", "2026-08-31"), context("legacy-lineage-read"));
+
+  assert.deepEqual(
+    await repository.getGovernedCaptureLineage("tenant-a", governed.snapshotId),
+    lineage
+  );
+  assert.equal(await repository.getGovernedCaptureLineage("tenant-b", governed.snapshotId), undefined);
+  assert.equal(await repository.getGovernedCaptureLineage("tenant-a", "missing-lineage"), undefined);
+  assert.equal(
+    await repository.getGovernedCaptureLineage("tenant-a", "legacy-lineage-read"),
+    undefined
+  );
+  repository.close();
+
+  const reopened = new SqliteDatasetSnapshotV2Repository(path);
+  assert.deepEqual(
+    await reopened.getGovernedCaptureLineage("tenant-a", governed.snapshotId),
+    lineage
+  );
+  reopened.close();
+});
+
+test("governed capture lineage reads reject tampered lineage indexes", async () => {
+  const path = databasePath();
+  const repository = new SqliteDatasetSnapshotV2Repository(path);
+  const governed = snapshot("governed-lineage-tamper", "2026-07-31");
+  await repository.commitGovernedCapture(
+    governed,
+    governedLineage(
+      governed,
+      "dataset-lineage-tamper",
+      "facility-lineage-tamper",
+      "binding-lineage-tamper",
+      "delivery-lineage-tamper"
+    ),
+    context("governed-lineage-tamper")
+  );
+  repository.close();
+
+  const database = new DatabaseSync(path);
+  database.exec("DROP TRIGGER surveillance_dataset_snapshot_lineage_v1_no_update");
+  database
+    .prepare(
+      `UPDATE surveillance_dataset_snapshot_lineage_v1
+          SET delivery_id = ?
+        WHERE tenant_id = ? AND record_id = ?`
+    )
+    .run("delivery-substituted", "tenant-a", governed.snapshotId);
+  database.exec(`
+    CREATE TRIGGER surveillance_dataset_snapshot_lineage_v1_no_update
+    BEFORE UPDATE ON surveillance_dataset_snapshot_lineage_v1
+    BEGIN
+      SELECT RAISE(ABORT, 'surveillance dataset snapshot lineage is immutable');
+    END;
+  `);
+  database.close();
+
+  const reopened = new SqliteDatasetSnapshotV2Repository(path);
+  await assert.rejects(
+    reopened.getGovernedCaptureLineage("tenant-a", governed.snapshotId),
+    (error: unknown) => repositoryCode(error, "INTEGRITY_FAILURE")
+  );
+  reopened.close();
+});
+
 test("certified evidence requires the persisted tenant snapshot and exact ArtifactStore metadata", async () => {
   const path = databasePath();
   const snapshots = new SqliteDatasetSnapshotV2Repository(path);

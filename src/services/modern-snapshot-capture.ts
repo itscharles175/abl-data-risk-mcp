@@ -538,14 +538,14 @@ export class ModernSnapshotCaptureServiceV1 {
       }
     | undefined
   > {
-    const resolve = this.#sourceMaterial?.resolveReplayIdentity;
-    if (resolve === undefined) return undefined;
+    const sourceMaterial = this.#sourceMaterial;
+    if (sourceMaterial?.resolveReplayIdentity === undefined) return undefined;
     const sectionIds = extraction.sections
       .filter((section) => section.present)
       .map((section) => section.sectionId)
       .sort();
     try {
-      return await resolve({
+      return await sourceMaterial.resolveReplayIdentity({
         tenantId: actor.tenantId,
         snapshotId: request.snapshotId,
         sourceContract,
