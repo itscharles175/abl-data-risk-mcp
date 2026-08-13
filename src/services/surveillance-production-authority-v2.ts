@@ -37,7 +37,12 @@ const MAX_SNAPSHOTS_PER_TENANT = 1_000_000;
  * unrecorded governance lineage.
  */
 export interface GovernedCertifiedSnapshotPublicationLinkReadPortV2 {
-  get(
+  /**
+   * Returns only a link that has not been disabled.  The V2 publication
+   * authority deliberately has no raw-read capability: revocation is part of
+   * selection authority, not an optional post-read policy check.
+   */
+  getEnabled(
     tenantId: string,
     linkId: string
   ): Promise<GovernedCertifiedSnapshotPublicationLinkV2 | undefined>;
@@ -99,7 +104,7 @@ export class RepositoryBackedSurveillanceSourcePublicationAuthorityV2 {
     readonly tenantId: string;
     readonly linkId: string;
   }): Promise<ResolvedGovernedCertifiedSnapshotPublicationV2 | undefined> {
-    const linkValue = await this.#dependencies.publicationLinks.get(input.tenantId, input.linkId);
+    const linkValue = await this.#dependencies.publicationLinks.getEnabled(input.tenantId, input.linkId);
     if (!linkValue) return undefined;
     const link = verified(() => parseGovernedCertifiedSnapshotPublicationLinkV2(linkValue));
     if (link.tenantId !== input.tenantId || link.linkId !== input.linkId) {

@@ -29,6 +29,7 @@ import {
   type GovernedCertifiedSnapshotPublicationLinkV2
 } from "../src/contracts/governed-certified-snapshot-publication-link-v2.js";
 import { ArtifactStore } from "../src/control/artifacts.js";
+import { GovernedCertifiedSnapshotPublicationLinkCatalogV2 } from "../src/control/governed-certified-snapshot-publication-links-v2.js";
 import {
   createGovernedSnapshotCommitLineageV1,
   type GovernedSnapshotCommitLineageV1
@@ -81,6 +82,14 @@ test("V2 authority fails closed when a frozen mapping definition is substituted"
   fixture.close();
 });
 
+test("V2 authority refuses a link disabled in the durable V2 catalog", async () => {
+  const fixture = fixtureEnvironment({ catalogDisabled: true });
+  const resolved = await fixture.authority.resolve({ tenantId: "tenant-a", linkId: fixture.link.linkId });
+
+  assert.equal(resolved, undefined);
+  fixture.close();
+});
+
 interface Fixture {
   readonly authority: RepositoryBackedSurveillanceSourcePublicationAuthorityV2;
   readonly evidence: CertifiedSnapshotEvidenceRecordV2;
@@ -89,7 +98,11 @@ interface Fixture {
   close(): void;
 }
 
-function fixtureEnvironment(options: { readonly lineage?: GovernedSnapshotCommitLineageV1 | undefined; readonly substituteMapping?: boolean } = {}): Fixture {
+function fixtureEnvironment(options: {
+  readonly lineage?: GovernedSnapshotCommitLineageV1 | undefined;
+  readonly substituteMapping?: boolean;
+  readonly catalogDisabled?: boolean;
+} = {}): Fixture {
   const directory = mkdtempSync(join(tmpdir(), "surveillance-production-authority-v2-"));
   directories.push(directory);
   const source = createSourceContractV1({
@@ -227,15 +240,32 @@ function fixtureEnvironment(options: { readonly lineage?: GovernedSnapshotCommit
   const definitions = definitionResolver([
     resolved(controlReference, control), resolved(sourceExecution, source), resolved(scopeExecution, scope), resolved(mappingExecution, options.substituteMapping ? { ...mapping, mappingKey: "substituted-mapping" } : mapping)
   ]);
+  const catalog = options.catalogDisabled === undefined
+    ? undefined
+    : new GovernedCertifiedSnapshotPublicationLinkCatalogV2(join(directory, "publication-links-v2.sqlite"));
+  if (catalog !== undefined) {
+    catalog.record({ link, requestHash: HASH("record-link-a"), actor: "publication-worker", idempotencyKey: "record-link-a" });
+    if (options.catalogDisabled) {
+      catalog.disable({
+        tenantId: "tenant-a",
+        linkId: link.linkId,
+        expectedLinkHash: link.linkHash,
+        reasonCode: "correction",
+        reason: "Superseded by a corrected certification",
+        disabledBy: "publication-worker",
+        idempotencyKey: "disable-link-a"
+      });
+    }
+  }
   const authority = new RepositoryBackedSurveillanceSourcePublicationAuthorityV2({
     datasetSnapshots: new StaticRepository(snapshot),
     captureLineage: { async getGovernedCaptureLineage() { return options.lineage === undefined && Object.hasOwn(options, "lineage") ? undefined : lineage; } },
     certifiedSnapshotEvidence: new StaticRepository(evidence),
-    publicationLinks: new StaticLinkRepository(link),
+    publicationLinks: catalog ?? new StaticLinkRepository(link),
     artifacts,
     definitions
   });
-  return { authority, evidence, link, lineage, close: () => undefined };
+  return { authority, evidence, link, lineage, close: () => catalog?.close() };
 }
 
 function definitionReference(
@@ -272,7 +302,7 @@ class StaticRepository<T extends { readonly tenantId: string }> implements Immut
 
 class StaticLinkRepository implements GovernedCertifiedSnapshotPublicationLinkReadPortV2 {
   constructor(private readonly link: GovernedCertifiedSnapshotPublicationLinkV2) {}
-  async get(tenantId: string, linkId: string): Promise<GovernedCertifiedSnapshotPublicationLinkV2 | undefined> { return tenantId === this.link.tenantId && linkId === this.link.linkId ? this.link : undefined; }
+  async getEnabled(tenantId: string, linkId: string): Promise<GovernedCertifiedSnapshotPublicationLinkV2 | undefined> { return tenantId === this.link.tenantId && linkId === this.link.linkId ? this.link : undefined; }
 }
 
 function authorityError(error: unknown, expected: SurveillanceProductionAuthorityV2Error["code"]): boolean {

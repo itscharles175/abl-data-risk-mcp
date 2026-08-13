@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="./docs/assets/abl-mcp-banner.svg" alt="ABL Data & Risk MCP — governed loan-tape analytics" width="100%" />
+  <img src="./docs/assets/aegis-ledger-github-banner.png" alt="Aegis Ledger — governed portfolio risk evidence" width="100%" />
 </p>
 
-<h1 align="center">ABL Data &amp; Risk MCP</h1>
+<h1 align="center">Aegis Ledger</h1>
 
 <p align="center">
   <img alt="Node.js 22.13 or newer" src="https://img.shields.io/badge/Node.js-%E2%89%A522.13-339933?logo=nodedotjs&amp;logoColor=white" />
@@ -12,7 +12,11 @@
 </p>
 
 <p align="center">
-  <strong>A governed, model-independent MCP system for asset-based lending and longitudinal loan-tape analytics.</strong>
+  <strong>Governed portfolio risk evidence for asset-based lending and longitudinal loan-tape analytics.</strong>
+</p>
+
+<p align="center">
+  <sub>Repository and MCP package: <strong>ABL Data &amp; Risk MCP</strong></sub>
 </p>
 
 <p align="center">
@@ -25,6 +29,8 @@
 </p>
 
 ## Why this exists
+
+> **Pilot release focus:** one facility, end to end—governed capture, certification, V2 publication, aggregate surveillance, correction/disable handling, and auditable results. Multi-facility analysis, ABL-v2, notifications, and production deployment remain deliberate follow-on releases.
 
 The product is deliberately narrower than “chat with SQL”:
 
