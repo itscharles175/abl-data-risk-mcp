@@ -73,6 +73,35 @@ const GovernedMappingExecutionReferenceV1Schema = z
   })
   .strict();
 
+const GovernedSourceContractExecutionReferenceV1Schema = z
+  .object({
+    definitionVersionId: IdentifierSchema,
+    definitionKey: IdentifierSchema,
+    kind: z.literal("source_contract"),
+    semanticVersion: z.string().min(1).max(64),
+    versionHash: Sha256HashSchema,
+    documentHash: Sha256HashSchema,
+    approvalEventHash: Sha256HashSchema,
+    sourceContract: SourceContractReferenceV1Schema
+  })
+  .strict();
+
+const GovernedDatasetScopeBindingExecutionReferenceV1Schema = z
+  .object({
+    definitionVersionId: IdentifierSchema,
+    definitionKey: IdentifierSchema,
+    kind: z.literal("dataset_scope_binding"),
+    semanticVersion: z.string().min(1).max(64),
+    versionHash: Sha256HashSchema,
+    documentHash: Sha256HashSchema,
+    approvalEventHash: Sha256HashSchema,
+    bindingId: IdentifierSchema,
+    revision: z.number().int().min(1).max(1_000_000),
+    bindingHash: Sha256HashSchema,
+    sourceContract: SourceContractReferenceV1Schema
+  })
+  .strict();
+
 const DataQualityRuleV1Schema = z.discriminatedUnion("type", [
   z
     .object({
@@ -255,7 +284,9 @@ const SnapshotCertificationDefinitionBodyV1Schema = z
     certificationDefinitionId: IdentifierSchema,
     revision: z.number().int().min(1).max(1_000_000),
     sourceContract: SourceContractReferenceV1Schema,
+    sourceContractExecution: GovernedSourceContractExecutionReferenceV1Schema,
     scopeBinding: GovernedDatasetScopeBindingV1Schema,
+    scopeBindingExecution: GovernedDatasetScopeBindingExecutionReferenceV1Schema,
     mappingExecution: GovernedMappingExecutionReferenceV1Schema,
     runtime: z
       .object({
@@ -275,6 +306,41 @@ const SnapshotCertificationDefinitionBodyV1Schema = z
   .superRefine((value, context) => {
     const scope = value.scopeBinding;
     const source = value.sourceContract;
+    const sourceExecution = value.sourceContractExecution;
+    const scopeExecution = value.scopeBindingExecution;
+    if (value.certificationDefinitionId !== scope.bindingId) {
+      context.addIssue({
+        code: "custom",
+        path: ["certificationDefinitionId"],
+        message: "must equal the facility scope binding id"
+      });
+    }
+    if (
+      sourceExecution.sourceContract.sourceContractId !== source.sourceContractId ||
+      sourceExecution.sourceContract.revision !== source.revision ||
+      sourceExecution.sourceContract.sourceContractHash !== source.sourceContractHash
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["sourceContractExecution", "sourceContract"],
+        message: "must match the exact raw source contract reference"
+      });
+    }
+    if (
+      scopeExecution.definitionKey !== scope.bindingId ||
+      scopeExecution.bindingId !== scope.bindingId ||
+      scopeExecution.revision !== scope.revision ||
+      scopeExecution.bindingHash !== scope.bindingHash ||
+      scopeExecution.sourceContract.sourceContractId !== source.sourceContractId ||
+      scopeExecution.sourceContract.revision !== source.revision ||
+      scopeExecution.sourceContract.sourceContractHash !== source.sourceContractHash
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["scopeBindingExecution"],
+        message: "must bind the exact raw scope binding and source contract under its binding id"
+      });
+    }
     if (
       scope.tenantId !== value.tenantId ||
       scope.scope.scopeType !== "facility" ||

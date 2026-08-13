@@ -32,11 +32,13 @@ import { parseMetricProjectionV1 } from "./metric-projection-v1.js";
 import { parseSourceAccessPolicyV1 } from "./source-access-policy-v1.js";
 import { parseSourceContractV1 } from "./source-contract-v1.js";
 import { parseFxRateDefinitionV1 } from "./fx-evidence-v1.js";
+import { parseSnapshotCertificationDefinitionV1 } from "./snapshot-certification-definition-v1.js";
 
 export const GovernedDefinitionKindV2Schema = z.enum([
   "source_contract",
   "source_access_policy",
   "fx_rate_definition",
+  "snapshot_certification_control",
   "dataset_scope_binding",
   "mapping_spec",
   "methodology_bundle",
@@ -505,6 +507,7 @@ export function computeDefinitionImpactPreviewV1(
     source_contract: ["certification", "ingestion"],
     source_access_policy: ["analytics", "authorization", "certification"],
     fx_rate_definition: ["analytics", "certification", "fx"],
+    snapshot_certification_control: ["certification", "data_quality", "reconciliation"],
     dataset_scope_binding: ["authorization", "certification", "portfolio_scope"],
     mapping_spec: ["certification", "mapping"],
     methodology_bundle: ["analytics", "replay"],
@@ -587,6 +590,24 @@ export function validateGovernedDefinitionDocumentV2(
         const normalized = { ...body, status: "proposed" as const };
         return canonicalClone(
           parseFxRateDefinitionV1({ ...normalized, definitionHash: canonicalHash(normalized) }),
+          `${kind} document`
+        );
+      }
+      case "snapshot_certification_control": {
+        const parsed = parseSnapshotCertificationDefinitionV1(document);
+        tenantMatch(parsed.tenantId, tenantId, kind);
+        logicalIdentity(parsed.certificationDefinitionId, definitionKey, kind);
+        documentVersion(parsed.revision, semanticVersion, kind);
+        effectivityMatch(
+          parsed.window.effectiveFrom,
+          parsed.window.effectiveTo,
+          effectiveFrom,
+          effectiveTo,
+          kind
+        );
+        const { definitionHash: _definitionHash, ...body } = parsed;
+        return canonicalClone(
+          parseSnapshotCertificationDefinitionV1({ ...body, definitionHash: canonicalHash(body) }),
           `${kind} document`
         );
       }

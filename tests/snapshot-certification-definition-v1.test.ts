@@ -29,6 +29,18 @@ test("snapshot certification control definition is canonical, immutable, and has
 });
 
 test("snapshot certification control definition binds source, facility scope, mapping execution, and runtime exactly", () => {
+  const aliasedControl = definitionInput();
+  aliasedControl.certificationDefinitionId = "another-certification-control";
+  invalid(() => createSnapshotCertificationDefinitionV1(aliasedControl));
+
+  const substitutedSourceExecution = definitionInput();
+  substitutedSourceExecution.sourceContractExecution.sourceContract.sourceContractHash = canonicalHash("other-source");
+  invalid(() => createSnapshotCertificationDefinitionV1(substitutedSourceExecution));
+
+  const substitutedScopeExecution = definitionInput();
+  substitutedScopeExecution.scopeBindingExecution.definitionKey = "another-binding";
+  invalid(() => createSnapshotCertificationDefinitionV1(substitutedScopeExecution));
+
   const badSource = definitionInput();
   badSource.mappingExecution.sourceContract.sourceContractHash = canonicalHash("other-source");
   invalid(() => createSnapshotCertificationDefinitionV1(badSource));
@@ -81,6 +93,8 @@ test("snapshot certification control definition rejects ambiguous or internally 
 
 function definitionInput(): SnapshotCertificationDefinitionV1Input & {
   mappingExecution: { sourceContract: { sourceContractHash: `sha256:${string}` }; activation: { activatedAt: string }; window: { effectiveFrom: string; effectiveTo?: string } };
+  sourceContractExecution: { sourceContract: { sourceContractHash: `sha256:${string}` } };
+  scopeBindingExecution: { definitionKey: string };
   scopeBinding: ReturnType<typeof createGovernedDatasetScopeBindingV1>;
   runtime: { mappingCompiler: { createdAt: string } };
   dataQuality: { requiredSectionIds: string[]; rules: Array<Record<string, unknown>>; window: { effectiveFrom: string; effectiveTo?: string } };
@@ -105,10 +119,33 @@ function definitionInput(): SnapshotCertificationDefinitionV1Input & {
     contractVersion: 1,
     definitionKind: "snapshot_certification_control",
     tenantId: "tenant-a",
-    certificationDefinitionId: "certification-control-a",
+    certificationDefinitionId: "facility-a-binding",
     revision: 1,
     sourceContract,
+    sourceContractExecution: {
+      definitionVersionId: "source-definition-a",
+      definitionKey: "loan-tape-source",
+      kind: "source_contract",
+      semanticVersion: "1.0.0",
+      versionHash: canonicalHash("source-version"),
+      documentHash: canonicalHash("source-document"),
+      approvalEventHash: canonicalHash("source-approval"),
+      sourceContract
+    },
     scopeBinding,
+    scopeBindingExecution: {
+      definitionVersionId: "scope-definition-a",
+      definitionKey: "facility-a-binding",
+      kind: "dataset_scope_binding",
+      semanticVersion: "1.0.0",
+      versionHash: canonicalHash("scope-version"),
+      documentHash: canonicalHash("scope-document"),
+      approvalEventHash: canonicalHash("scope-approval"),
+      bindingId: "facility-a-binding",
+      revision: 1,
+      bindingHash: scopeBinding.bindingHash,
+      sourceContract
+    },
     mappingExecution: {
       definitionVersionId: "mapping-definition-a",
       definitionKey: "loan-tape",
