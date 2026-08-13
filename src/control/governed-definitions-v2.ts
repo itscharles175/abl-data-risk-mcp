@@ -34,7 +34,7 @@ export type {
 } from "../contracts/index.js";
 
 export const GOVERNED_DEFINITION_V2_STORE_COMPONENT = "abl.governed-definition-v2-store" as const;
-export const GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION = 4 as const;
+export const GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION = 5 as const;
 
 export interface ProposeGovernedDefinitionV2Input {
   readonly tenantId: string;
@@ -166,7 +166,8 @@ export class GovernedDefinitionV2Store {
           { version: 1, sql: GOVERNED_DEFINITION_V2_SCHEMA_V1 },
           { version: 2, sql: GOVERNED_DEFINITION_V2_MIGRATION_V2 },
           { version: 3, sql: GOVERNED_DEFINITION_V2_MIGRATION_V3 },
-          { version: 4, sql: GOVERNED_DEFINITION_V2_MIGRATION_V4 }
+          { version: 4, sql: GOVERNED_DEFINITION_V2_MIGRATION_V4 },
+          { version: 5, sql: GOVERNED_DEFINITION_V2_MIGRATION_V5 }
         ],
         unsupportedVersionError: (current, supported) =>
           new GovernedDefinitionV2StoreError(
@@ -1275,6 +1276,17 @@ DROP TABLE governed_definition_v2_idempotency_v3;
 DROP TABLE governed_definition_v2_events_v3;
 DROP TABLE governed_definition_v2_versions_v3;
 `;
+
+// Additive v5 widens the immutable definition-kind CHECK for FX rate
+// definitions. It deliberately mirrors the fully attested v4 rebuild so
+// historical rows, receipts, audit hashes, and AUTOINCREMENT high-water stay
+// byte-for-byte stable.
+const GOVERNED_DEFINITION_V2_MIGRATION_V5 = GOVERNED_DEFINITION_V2_MIGRATION_V4
+  .replaceAll("_v3", "_v4")
+  .replace(
+    "'scenario_definition','covenant_definition'",
+    "'scenario_definition','covenant_definition','fx_rate_definition'"
+  );
 
 interface GovernedDefinitionVersionRow {
   readonly tenant_id: string;

@@ -6,6 +6,7 @@ import {
   Sha256HashSchema,
   canonicalHash,
   canonicalJson,
+  parseFxRateDefinitionV1,
   parseGovernedDefinitionVersionV2,
   parseMappingSpecV2,
   parseSourceContractV1,
@@ -170,14 +171,18 @@ export class GovernedDefinitionV2Resolver {
     if (version.tenantId !== tenantId) {
       integrity("Governed definition resolution crossed a tenant boundary");
     }
-    const approval = this.#verifyLifecycle(tenantId, version, view);
+    const lifecycle = this.#verifyLifecycle(tenantId, version, view);
     if (!allowedStatuses.includes(view.status)) {
       throw new GovernedDefinitionV2ResolverError(
         "UNAPPROVED",
         `Governed definition status ${String(view.status)} is not executable in this resolution mode`
       );
     }
-    const executionDocument = projectExecutionDocument(version, approval);
+    const executionDocument = projectExecutionDocument(
+      version,
+      lifecycle.approval,
+      lifecycle.activationEvent
+    );
     const reference = immutable({
       definitionVersionId: version.definitionVersionId,
       definitionKey: version.definitionKey,
@@ -185,11 +190,11 @@ export class GovernedDefinitionV2Resolver {
       semanticVersion: version.semanticVersion,
       versionHash: version.versionHash,
       documentHash: version.documentHash,
-      approvalEventHash: approval.approvalEventHash
+      approvalEventHash: lifecycle.approval.approvalEventHash
     });
     const result = immutable({
       reference,
-      approvalEvidence: approval,
+      approvalEvidence: lifecycle.approval,
       executionDocument
     });
     return Object.freeze({ version, result });
@@ -199,7 +204,10 @@ export class GovernedDefinitionV2Resolver {
     tenantId: string,
     version: GovernedDefinitionVersionV2,
     view: GovernedDefinitionViewV2
-  ): GovernedDefinitionExecutionApprovalV2 {
+  ): Readonly<{
+    approval: GovernedDefinitionExecutionApprovalV2;
+    activationEvent: GovernedDefinitionAuditEventV2 | undefined;
+  }> {
     const events = this.#auditEvents(tenantId).filter(
       (event) => event.definitionVersionId === version.definitionVersionId
     );
@@ -210,6 +218,7 @@ export class GovernedDefinitionV2Resolver {
 
     let expectedFrom: GovernedDefinitionStatusV2 | null = null;
     let approvalEvent: GovernedDefinitionAuditEventV2 | undefined;
+    let activationEvent: GovernedDefinitionAuditEventV2 | undefined;
     for (const [index, event] of events.entries()) {
       const expectedRevision = index + 1;
       if (
@@ -244,6 +253,10 @@ export class GovernedDefinitionV2Resolver {
         if (approvalEvent !== undefined) integrity("Governed definition contains duplicate approvals");
         approvalEvent = event;
       }
+      if (event.toStatus === "active") {
+        if (activationEvent !== undefined) integrity("Governed definition contains duplicate activations");
+        activationEvent = event;
+      }
       expectedFrom = event.toStatus;
     }
 
@@ -274,11 +287,14 @@ export class GovernedDefinitionV2Resolver {
       integrity("Governed definition approval evidence does not match the approval event");
     }
     return immutable({
-      status: "approved" as const,
-      proposedBy: version.proposedBy,
-      approvedBy: approvalEvent.actor,
-      approvedAt: approvalEvent.occurredAt,
-      approvalEventHash: approvalEvent.eventHash
+      approval: {
+        status: "approved" as const,
+        proposedBy: version.proposedBy,
+        approvedBy: approvalEvent.actor,
+        approvedAt: approvalEvent.occurredAt,
+        approvalEventHash: approvalEvent.eventHash
+      },
+      activationEvent
     });
   }
 
@@ -309,7 +325,8 @@ export class GovernedDefinitionV2Resolver {
 
 function projectExecutionDocument(
   version: GovernedDefinitionVersionV2,
-  approval: GovernedDefinitionExecutionApprovalV2
+  approval: GovernedDefinitionExecutionApprovalV2,
+  activationEvent: GovernedDefinitionAuditEventV2 | undefined
 ): CanonicalJsonValue {
   const document = record(version.document, `${version.kind} document`);
   try {
@@ -342,6 +359,42 @@ function projectExecutionDocument(
         return immutable(canonicalClone(parseMappingSpecV2({
           ...body,
           mappingSpecHash: canonicalHash(body)
+        })));
+      }
+      case "fx_rate_definition": {
+        if (activationEvent === undefined) {
+          integrity("FX execution requires immutable lifecycle activation evidence");
+        }
+        const { definitionHash: _definitionHash, ...stored } = document;
+        const activationBody = {
+          authority: "governed_definition_v2_lifecycle" as const,
+          tenantId: version.tenantId,
+          fxDefinitionId: version.definitionKey,
+          version: version.semanticVersion,
+          definitionVersionId: version.definitionVersionId,
+          definitionVersionHash: version.versionHash,
+          activationEventId: activationEvent.eventId,
+          tenantSequence: activationEvent.sequence,
+          previousEventHash: activationEvent.previousEventHash,
+          activationEventHash: activationEvent.eventHash,
+          activatedBy: activationEvent.actor,
+          activatedAt: activationEvent.occurredAt
+        };
+        const body = {
+          ...stored,
+          status: "active" as const,
+          createdBy: approval.proposedBy,
+          createdAt: version.proposedAt,
+          approvedBy: approval.approvedBy,
+          approvedAt: approval.approvedAt,
+          activation: {
+            ...activationBody,
+            referenceHash: canonicalHash(activationBody)
+          }
+        };
+        return immutable(canonicalClone(parseFxRateDefinitionV1({
+          ...body,
+          definitionHash: canonicalHash(body)
         })));
       }
       case "metric_definition": {

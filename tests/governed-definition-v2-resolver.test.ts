@@ -6,6 +6,7 @@ import { afterEach, test } from "node:test";
 
 import {
   canonicalHash,
+  createFxRateDefinitionV1,
   createMappingSpecV2,
   createSourceContractV1,
   type CanonicalJsonValue
@@ -242,6 +243,68 @@ test("source-contract and mapping projections replace forged identity and recomp
   assert.equal(mappingDocument.approvedBy, "real-checker");
   assertCanonicalInnerHash(mappingDocument, "mappingSpecHash");
   assert.notEqual(mappingDocument.mappingSpecHash, mapping.mappingSpecHash);
+  store.close();
+});
+
+test("FX definitions derive active execution and activation lineage exclusively from lifecycle events", () => {
+  const store = fixture();
+  const resolver = new GovernedDefinitionV2Resolver(store);
+  const sourceHash = canonicalHash({ source: "fx-rate-feed" });
+  const source = createFxRateDefinitionV1({
+    contractVersion: 1,
+    tenantId: "tenant-a",
+    fxDefinitionId: "usd-cad-closing",
+    version: "1.0.0",
+    status: "proposed",
+    sourceContract: {
+      sourceContractId: "fx-rates-source",
+      revision: 1,
+      sourceContractHash: sourceHash
+    },
+    provider: "central-bank",
+    pair: { baseCurrency: "USD", quoteCurrency: "CAD" },
+    rateType: "closing",
+    sourceConvention: "base_to_quote",
+    ratePrecision: 6,
+    baseAmountPrecision: 2,
+    quoteAmountPrecision: 2,
+    effectiveFrom: "2026-01-01",
+    createdBy: "forged-maker",
+    createdAt: "2099-01-01T00:00:00.000Z"
+  });
+  const active = activate(
+    store,
+    store.propose({
+      tenantId: "tenant-a",
+      definitionVersionId: "fx-usd-cad-v1",
+      definitionKey: "usd-cad-closing",
+      kind: "fx_rate_definition",
+      semanticVersion: "1.0.0",
+      effectiveFrom: "2026-01-01",
+      document: source,
+      proposedBy: "real-maker",
+      idempotencyKey: "fx-propose"
+    }),
+    "real-checker",
+    "fx"
+  );
+  const resolved = resolver.resolveEffective({
+    tenantId: "tenant-a",
+    kind: "fx_rate_definition",
+    definitionKey: "usd-cad-closing",
+    asOfDate: "2026-08-12"
+  });
+  const execution = resolved.executionDocument as Record<string, unknown>;
+  const activation = execution.activation as Record<string, unknown>;
+  assert.equal(execution.status, "active");
+  assert.equal(execution.createdBy, "real-maker");
+  assert.equal(execution.createdAt, active.version.proposedAt);
+  assert.equal(execution.approvedBy, "real-checker");
+  assert.equal(activation.definitionVersionId, "fx-usd-cad-v1");
+  assert.equal(activation.definitionVersionHash, active.version.versionHash);
+  assert.equal(activation.activatedBy, "real-checker");
+  assertCanonicalInnerHash(execution, "definitionHash");
+  assert.equal(JSON.stringify(execution).includes("forged-maker"), false);
   store.close();
 });
 
