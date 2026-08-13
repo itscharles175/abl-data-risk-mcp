@@ -37,6 +37,7 @@ import {
   SqliteSurveillanceEvidenceRepositories
 } from "../src/repositories/sqlite-surveillance.js";
 import { SqliteCertificationArtifactStagingStoreV1 } from "../src/repositories/certification-artifact-staging-v1.js";
+import type { CertificationArtifactStagingStoreV1 } from "../src/repositories/certification-artifact-staging-v1.js";
 import type {
   SnapshotCertificationAttemptStoreV1,
   StartSnapshotCertificationAttemptV1
@@ -288,6 +289,41 @@ test("optional artifact staging preserves failure lineage, commits the exact evi
   }
 });
 
+test("an unknown stage-commit outcome recovers only the exact primary evidence binding", async () => {
+  for (const lifecycleGoverned of [false, true] as const) {
+    const fixture = await createFixture({
+      lifecycleGoverned,
+      artifactStaging: true,
+      stageCommitFailsAfterPersistOnce: true
+    });
+    try {
+      const first = await fixture.service.certify(fixture.request, fixture.actor);
+      const primaryEvidenceHash = lifecycleGoverned
+        ? first.evidenceV2?.evidenceHash
+        : first.evidence.evidenceHash;
+      assert.ok(primaryEvidenceHash);
+      const committed = await fixture.staging?.get({
+        tenantId: fixture.actor.tenantId,
+        certificationManifestId: fixture.certificationManifestId
+      });
+      assert.equal(committed?.state, "evidence_committed");
+      assert.equal(committed?.certificationEvidenceHash, primaryEvidenceHash);
+      assert.equal(committed?.events.length, 2, "the uncertain response must not create a second event");
+
+      fixture.setNow("2026-08-02T11:00:00.000Z");
+      const replay = await fixture.service.certify(fixture.request, fixture.actor);
+      assert.equal(replay.replayed, true);
+      assert.equal(
+        lifecycleGoverned ? replay.evidenceV2?.evidenceHash : replay.evidence.evidenceHash,
+        primaryEvidenceHash
+      );
+      assert.equal(fixture.artifactWrites, 1, "recovery must replay the staged artifact rather than rematerialize it");
+    } finally {
+      fixture.close();
+    }
+  }
+});
+
 test("certification rejects caller-supplied quantitative fields and cross-actor manifest reuse", async () => {
   const fixture = await createFixture();
   try {
@@ -530,6 +566,7 @@ interface FixtureOptions {
   readonly effectiveTo?: string;
   readonly evidencePutFailsOnce?: boolean;
   readonly artifactStaging?: boolean;
+  readonly stageCommitFailsAfterPersistOnce?: boolean;
   readonly runtimeActivatedAfterAttempt?: boolean;
   readonly lifecycleGoverned?: boolean;
   readonly lifecycleWithoutRuntime?: boolean;
@@ -759,6 +796,22 @@ async function createFixture(options: FixtureOptions = {}) {
   const staging = options.artifactStaging
     ? new SqliteCertificationArtifactStagingStoreV1(join(directory, "artifact-staging.sqlite"))
     : undefined;
+  let stageCommitFailuresRemaining = options.stageCommitFailsAfterPersistOnce ? 1 : 0;
+  const artifactStaging: CertificationArtifactStagingStoreV1 | undefined = staging === undefined
+    ? undefined
+    : {
+        prepareOrReplay: staging.prepareOrReplay.bind(staging),
+        async recordEvidenceCommitted(input) {
+          const committed = await staging.recordEvidenceCommitted(input);
+          if (stageCommitFailuresRemaining > 0) {
+            stageCommitFailuresRemaining -= 1;
+            throw new Error("simulated post-persist stage commit response failure");
+          }
+          return committed;
+        },
+        recordEvidenceFailure: staging.recordEvidenceFailure.bind(staging),
+        get: staging.get.bind(staging)
+      };
   const receipts = new InMemoryImmutableRepository<ModernSnapshotExtractionReceiptV1>(
     "modern-certification-receipts",
     (record) => record.receiptId
@@ -833,7 +886,7 @@ async function createFixture(options: FixtureOptions = {}) {
     },
     ...(certifiedEvidenceV2 === undefined ? {} : { certifiedEvidenceV2 }),
     attempts,
-    artifactStaging: staging,
+    artifactStaging,
     sourceEvidence: {
       async loadSection(input) {
         sourceLoads += 1;

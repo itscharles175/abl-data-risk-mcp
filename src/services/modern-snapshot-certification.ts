@@ -982,6 +982,30 @@ export class ModernSnapshotCertificationService {
         input.certificationEvidenceHash
       );
     } catch (error) {
+      // A crash or transport failure may occur after the staging store durably
+      // appends the commit event but before this caller observes its response.
+      // Read back the immutable outbox before declaring the evidence orphaned:
+      // only an exact, primary-evidence-bound commit is recoverable here.
+      try {
+        const recovered = await staging.get({
+          tenantId: input.actor.tenantId,
+          certificationManifestId: input.request.certificationManifestId
+        });
+        if (recovered !== undefined) {
+          this.#assertArtifactStage(
+            recovered,
+            input.request,
+            input.actor,
+            input.attempt,
+            input.artifactMetadata,
+            input.artifactBindingHash,
+            input.certificationEvidenceHash
+          );
+          return;
+        }
+      } catch (recoveryError) {
+        if (recoveryError instanceof ModernSnapshotCertificationError) throw recoveryError;
+      }
       if (error instanceof ModernSnapshotCertificationError) throw error;
       fail("INTEGRITY_FAILURE", "Certification artifact stage commit could not be persisted or verified");
     }
