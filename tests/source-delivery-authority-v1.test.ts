@@ -28,6 +28,11 @@ import {
   ModernSnapshotCaptureServiceV1,
   type ModernSnapshotExtractionReceiptV1
 } from "../src/services/modern-snapshot-capture.js";
+import {
+  GovernedSourceDeliveryRegistrationError,
+  GovernedSourceDeliveryRegistrationServiceV1
+} from "../src/services/governed-source-delivery-registration.js";
+import type { ResolvedGovernedDefinitionV2 } from "../src/services/governed-definition-v2-resolver.js";
 
 const OBSERVED_AT = "2026-08-01T23:55:00.000Z";
 const RECEIVED_AT = "2026-08-02T00:00:00.000Z";
@@ -221,6 +226,93 @@ test("the authority composes directly with IDs-only modern capture and preflight
   }
 });
 
+test("lifecycle-backed registration accepts only governed version IDs and trusted delivery material", async () => {
+  const fixture = authorityFixture();
+  try {
+    // This is the resolver's immutable execution projection: it contains
+    // lifecycle approval evidence as `approved`, not a caller-asserted active
+    // source document.
+    const source = sourceContract("tenant-a", "postgresql", "approved");
+    const binding = scopeBinding(source);
+    const sourceResolution = resolvedDefinition("source-v1", "source_contract", "loan-tape", source);
+    const bindingResolution = resolvedDefinition(
+      "binding-v1",
+      "dataset_scope_binding",
+      binding.bindingId,
+      binding
+    );
+    let materialLoads = 0;
+    const service = new GovernedSourceDeliveryRegistrationServiceV1({
+      definitions: {
+        resolveFrozen: ({ definitionVersionId }) => {
+          if (definitionVersionId === "source-v1") return sourceResolution;
+          if (definitionVersionId === "binding-v1") return bindingResolution;
+          throw new Error("unexpected definition version");
+        },
+        resolveEffective: ({ kind, definitionKey, asOfDate }) => {
+          assert.equal(asOfDate, "2026-08-01");
+          if (kind === "source_contract" && definitionKey === "loan-tape") return sourceResolution;
+          if (kind === "dataset_scope_binding" && definitionKey === binding.bindingId) return bindingResolution;
+          throw new Error("unexpected effective definition");
+        }
+      },
+      deliveryMaterial: {
+        resolveForRegistration: async ({ tenantId, deliveryId }) => {
+          materialLoads += 1;
+          assert.equal(tenantId, "tenant-a");
+          assert.equal(deliveryId, "delivery-governed-2026-08");
+          return {
+            locator: postgresqlLocator(source),
+            sourceObservedAt: OBSERVED_AT,
+            receivedAt: RECEIVED_AT
+          };
+        }
+      },
+      catalog: fixture.authority
+    });
+
+    const result = await service.register(actor("tenant-a"), {
+      deliveryId: "delivery-governed-2026-08",
+      sourceContractDefinitionVersionId: "source-v1",
+      datasetScopeBindingDefinitionVersionId: "binding-v1",
+      idempotencyKey: "governed-delivery-registration"
+    });
+    assert.equal(result.replayed, false);
+    assert.equal(result.resolution.delivery.sourceContract.sourceContractHash, source.sourceContractHash);
+    assert.equal(result.resolution.delivery.scopeBinding.bindingHash, binding.bindingHash);
+    assert.equal(materialLoads, 1);
+
+    await assert.rejects(
+      () =>
+        service.register(
+          { tenantId: "tenant-a", actorId: "forged", authority: "platform_operator" } as never,
+          {
+            deliveryId: "delivery-actor-smuggle",
+            sourceContractDefinitionVersionId: "source-v1",
+            datasetScopeBindingDefinitionVersionId: "binding-v1",
+            idempotencyKey: "governed-delivery-actor-smuggle"
+          }
+        ),
+      (error: unknown) => registrationError(error, "INVALID_INPUT")
+    );
+    assert.equal(materialLoads, 1);
+
+    await assert.rejects(
+      () =>
+        service.register(actor("tenant-a"), {
+          deliveryId: "delivery-governed-2026-08",
+          sourceContractDefinitionVersionId: "binding-v1",
+          datasetScopeBindingDefinitionVersionId: "binding-v1",
+          idempotencyKey: "governed-delivery-wrong-kind"
+        }),
+      (error: unknown) => registrationError(error, "INTEGRITY_FAILURE")
+    );
+    fixture.authority.close();
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("idempotency replay is exact, conflicts fail closed, and immutable source versions are tenant-scoped unique", () => {
   const fixture = authorityFixture();
   try {
@@ -388,15 +480,21 @@ test("exact source-contract and scope-binding revisions remain immutable while o
   }
 });
 
-test("registration requires active exact effective governance and matching immutable locators", () => {
+test("registration requires executable exact effective governance and matching immutable locators", () => {
   const cases: readonly {
     readonly label: string;
     readonly build: () => RegisterGovernedSourceDeliveryV1;
   }[] = [
     {
-      label: "inactive source",
+      label: "proposed source",
       build: () => {
-        const source = sourceContract("tenant-a", "postgresql", "approved");
+        const active = sourceContract("tenant-a", "postgresql", "active");
+        const { sourceContractHash: _sourceContractHash, ...body } = active;
+        const { approvedBy: _approvedBy, approvedAt: _approvedAt, ...proposedBody } = body;
+        const source = createSourceContractV1({
+          ...proposedBody,
+          status: "proposed"
+        });
         return registerInput(source, scopeBinding(source), postgresqlLocator(source));
       }
     },
@@ -798,6 +896,33 @@ function hash(label: string) {
   return canonicalHash({ label });
 }
 
+function resolvedDefinition(
+  definitionVersionId: string,
+  kind: "source_contract" | "dataset_scope_binding",
+  definitionKey: string,
+  executionDocument: unknown
+): ResolvedGovernedDefinitionV2 {
+  return {
+    reference: {
+      definitionVersionId,
+      definitionKey,
+      kind,
+      semanticVersion: "1.0.0",
+      versionHash: hash(`${definitionVersionId}-version`),
+      documentHash: hash(`${definitionVersionId}-document`),
+      approvalEventHash: hash(`${definitionVersionId}-approval`)
+    },
+    approvalEvidence: {
+      status: "approved",
+      proposedBy: "maker-1",
+      approvedBy: "checker-1",
+      approvedAt: "2026-07-31T00:00:00.000Z",
+      approvalEventHash: hash(`${definitionVersionId}-approval`)
+    },
+    executionDocument: executionDocument as never
+  };
+}
+
 function modernSnapshotId(deliveryId: string): string {
   return `snapshot-${canonicalHash({
     contractVersion: 1,
@@ -809,6 +934,15 @@ function modernSnapshotId(deliveryId: string): string {
 
 function authorityError(error: unknown, code: SourceDeliveryAuthorityError["code"]): boolean {
   assert.ok(error instanceof SourceDeliveryAuthorityError);
+  assert.equal(error.code, code);
+  return true;
+}
+
+function registrationError(
+  error: unknown,
+  code: GovernedSourceDeliveryRegistrationError["code"]
+): boolean {
+  assert.ok(error instanceof GovernedSourceDeliveryRegistrationError);
   assert.equal(error.code, code);
   return true;
 }

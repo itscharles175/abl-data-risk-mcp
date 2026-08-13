@@ -1302,7 +1302,14 @@ function trustedActor(value: TrustedSourceDeliveryActorV1): TrustedSourceDeliver
 }
 
 function validateBinding(source: SourceContractV1, binding: GovernedDatasetScopeBindingV1): void {
-  if (source.status !== "active") invalid("Source contract must be active");
+  // A lifecycle resolver projects an executable source contract with its
+  // immutable approval evidence as `approved`; the legacy trusted-import
+  // path may still carry an already materialized `active` source contract.
+  // Neither state is authority on its own — lifecycle-backed registration
+  // verifies the governed version before it reaches this catalog.
+  if (source.status !== "active" && source.status !== "approved") {
+    invalid("Source contract must be active or lifecycle-approved");
+  }
   if (
     binding.sourceContract.sourceContractId !== source.sourceContractId ||
     binding.sourceContract.revision !== source.revision ||
