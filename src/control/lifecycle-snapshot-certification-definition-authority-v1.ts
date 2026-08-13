@@ -8,6 +8,7 @@ import {
   type GovernedDatasetScopeBindingV1,
   type SnapshotCertificationAttemptV1
 } from "../contracts/index.js";
+import type { CertifiedSnapshotEvidenceRecordV2 } from "../contracts/certified-snapshot-evidence-v2.js";
 import {
   parseGovernedSourceDeliveryRecordV1,
   type GovernedSourceDeliveryRecordV1
@@ -39,10 +40,26 @@ import type {
  * ``now`` selection from silently becoming production authority.
  */
 export interface LifecycleSnapshotCertificationDefinitionAuthorityV1 {
+  /**
+   * Production-only resolution: preserves the authority-projected lineage
+   * required for the V2 certification-evidence envelope.
+   */
+  resolveForCertificationAttemptDetailed(input: {
+    readonly evidence: LifecycleBoundSnapshotCertificationEvidenceV1;
+    readonly attempt: SnapshotCertificationAttemptV1;
+  }): Promise<LifecycleSnapshotCertificationResolutionV1 | undefined>;
+
+  /** Compatibility projection for legacy trusted-import compositions. */
   resolveForCertificationAttempt(input: {
     readonly evidence: LifecycleBoundSnapshotCertificationEvidenceV1;
     readonly attempt: SnapshotCertificationAttemptV1;
   }): Promise<ModernCertificationDefinitionResolutionV1 | undefined>;
+}
+
+/** Exact lifecycle authority provenance paired with executable controls. */
+export interface LifecycleSnapshotCertificationResolutionV1 {
+  readonly resolution: ModernCertificationDefinitionResolutionV1;
+  readonly governance: CertifiedSnapshotEvidenceRecordV2["governance"];
 }
 
 export interface LifecycleBoundSnapshotCertificationEvidenceV1 {
@@ -95,6 +112,14 @@ export class LifecycleSnapshotCertificationDefinitionAuthorityV1
     readonly evidence: LifecycleBoundSnapshotCertificationEvidenceV1;
     readonly attempt: SnapshotCertificationAttemptV1;
   }): Promise<ModernCertificationDefinitionResolutionV1 | undefined> {
+    const detailed = await this.resolveForCertificationAttemptDetailed(inputValue);
+    return detailed?.resolution;
+  }
+
+  async resolveForCertificationAttemptDetailed(inputValue: {
+    readonly evidence: LifecycleBoundSnapshotCertificationEvidenceV1;
+    readonly attempt: SnapshotCertificationAttemptV1;
+  }): Promise<LifecycleSnapshotCertificationResolutionV1 | undefined> {
     const evidence = boundEvidence(inputValue?.evidence);
     const attempt = attemptEvidence(inputValue?.attempt);
     this.#verifyAttempt(evidence, attempt);
@@ -201,7 +226,7 @@ export class LifecycleSnapshotCertificationDefinitionAuthorityV1
       integrity("Activated runtime did not exactly match the certification control and mapping lineage");
     }
 
-    return deepFreeze({
+    const resolution = {
       mappingSpec: mapping.mappingSpec,
       mappingWindow: mapping.window,
       runtime: {
@@ -211,7 +236,87 @@ export class LifecycleSnapshotCertificationDefinitionAuthorityV1
       },
       dataQuality: definition.dataQuality,
       reconciliation: definition.certificationReconciliation
-    }) as ModernCertificationDefinitionResolutionV1;
+    } as ModernCertificationDefinitionResolutionV1;
+    return deepFreeze({
+      resolution,
+      governance: {
+        control: {
+          definition,
+          reference: control.reference,
+          approval: control.approvalEvidence,
+          activation: this.#controlActivation(
+            evidence.tenantId,
+            control.reference.definitionVersionId,
+            attempt.certifiedAt
+          )
+        },
+        sourceContract: {
+          raw: definition.sourceContract,
+          execution: source.reference
+        },
+        scopeBinding: {
+          raw: scopeDocument,
+          execution: scope.reference
+        },
+        mapping: {
+          execution: mapping.reference,
+          activation: mapping.activationEvidence
+        },
+        runtime: {
+          runtimeBundleId: runtime.runtime.runtimeBundleId,
+          runtimeVersion: runtime.runtime.runtimeVersion,
+          runtimeBundleHash: runtime.runtime.runtimeBundleHash,
+          activation: runtime.activation,
+          dictionary: runtime.dictionary.reference,
+          mappingCompiler: runtime.mappingCompiler.reference
+        }
+      }
+    }) as LifecycleSnapshotCertificationResolutionV1;
+  }
+
+  #controlActivation(
+    tenantId: string,
+    definitionVersionId: string,
+    certifiedAt: string
+  ): CertifiedSnapshotEvidenceRecordV2["governance"]["control"]["activation"] {
+    const events: Array<{
+      readonly sequence: number;
+      readonly definitionVersionId: string;
+      readonly lifecycleRevision: number;
+      readonly fromStatus: string | null;
+      readonly toStatus: string;
+      readonly actor: string;
+      readonly occurredAt: string;
+      readonly eventHash: `sha256:${string}`;
+    }> = [];
+    let afterSequence = 0;
+    for (;;) {
+      const page = this.dependencies.governed.authority.listAuditEvents(tenantId, afterSequence, 1_000);
+      if (!Array.isArray(page)) integrity("Governed control lifecycle authority returned an invalid audit page");
+      if (page.length === 0) break;
+      for (const event of page) {
+        if (event.sequence <= afterSequence) integrity("Governed control lifecycle audit sequence is non-monotonic");
+        afterSequence = event.sequence;
+        events.push(event);
+      }
+      if (page.length < 1_000) break;
+      if (events.length > 1_000_000) integrity("Governed control lifecycle history exceeds the safety bound");
+    }
+    const activations = events.filter(
+      (event) => event.definitionVersionId === definitionVersionId && event.toStatus === "active"
+    );
+    if (activations.length !== 1) integrity("Snapshot certification control must have exactly one durable activation event");
+    const activation = activations[0]!;
+    if (activation.fromStatus !== "approved" || activation.occurredAt > certifiedAt) {
+      integrity("Snapshot certification control activation cannot follow its certification attempt");
+    }
+    return deepFreeze({
+      status: "active" as const,
+      lifecycleRevision: activation.lifecycleRevision,
+      activatedBy: activation.actor,
+      activatedAt: activation.occurredAt,
+      activationEventHash: activation.eventHash
+    });
   }
 
   #resolveFrozen(tenantId: string, definitionVersionId: string) {

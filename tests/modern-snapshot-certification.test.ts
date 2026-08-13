@@ -10,6 +10,7 @@ import {
   createGovernedDatasetScopeBindingV1,
   createHistoricalRuntimeBundleV1,
   createMappingSpecV2,
+  createSnapshotCertificationDefinitionV1,
   createSnapshotCertificationAttemptV1,
   createSourceContractV1,
   InMemoryHistoricalRuntimeResolver,
@@ -21,6 +22,10 @@ import {
   type SnapshotCertificationAttemptV1,
   type SourceContractV1
 } from "../src/contracts/index.js";
+import {
+  parseCertifiedSnapshotEvidenceRecordV2,
+  type CertifiedSnapshotEvidenceRecordV2
+} from "../src/contracts/certified-snapshot-evidence-v2.js";
 import {
   createGovernedSourceDeliveryRecordV1,
   type GovernedSourceDeliveryRecordV1,
@@ -98,6 +103,61 @@ test("exact certified replay does not consult mutable live-delivery authority", 
     assert.equal(fixture.deliveryLoads, 1);
   } finally {
     fixture.close();
+  }
+});
+
+test("lifecycle-governed certification exclusively uses decision-time authority and returns an exact V2 envelope on replay", async () => {
+  const fixture = await createFixture({ lifecycleGoverned: true });
+  try {
+    const first = await fixture.service.certify(fixture.request, fixture.actor);
+    assert.equal(first.replayed, false);
+    assert.ok(first.evidenceV2);
+    assert.deepEqual(parseCertifiedSnapshotEvidenceRecordV2(first.evidenceV2), first.evidenceV2);
+    assert.equal(first.evidenceV2.v1Evidence.evidenceHash, first.evidence.evidenceHash);
+    assert.equal(fixture.definitionLoads, 0, "legacy definitions must never be consulted in lifecycle composition");
+    assert.equal(fixture.lifecycleDefinitionLoads, 1);
+
+    const replay = await fixture.service.certify(fixture.request, fixture.actor);
+    assert.equal(replay.replayed, true);
+    assert.ok(replay.evidenceV2);
+    assert.equal(replay.evidenceV2.evidenceHash, first.evidenceV2.evidenceHash);
+    assert.equal(fixture.definitionLoads, 0);
+    assert.equal(fixture.lifecycleDefinitionLoads, 2);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("lifecycle-governed certification fails closed without its runtime authority or when projected V2 lineage is tampered", async () => {
+  const noRuntime = await createFixture({ lifecycleGoverned: true, lifecycleWithoutRuntime: true });
+  try {
+    await assert.rejects(
+      noRuntime.service.certify(noRuntime.request, noRuntime.actor),
+      certificationCode("INTEGRITY_FAILURE")
+    );
+    assert.equal(noRuntime.definitionLoads, 0);
+    assert.equal(noRuntime.artifactWrites, 0);
+  } finally {
+    noRuntime.close();
+  }
+
+  const tampered = await createFixture({ lifecycleGoverned: true, tamperLifecycleGovernance: true });
+  try {
+    await assert.rejects(
+      tampered.service.certify(tampered.request, tampered.actor),
+      certificationCode("INTEGRITY_FAILURE")
+    );
+    assert.equal(tampered.definitionLoads, 0);
+    assert.equal(tampered.artifactWrites, 0, "runtime lineage tamper must fail before materializing an artifact");
+    assert.equal(
+      await tampered.repositories.certifiedSnapshotEvidence.get(
+        tampered.actor.tenantId,
+        tampered.certificationManifestId
+      ),
+      undefined
+    );
+  } finally {
+    tampered.close();
   }
 });
 
@@ -413,6 +473,9 @@ interface FixtureOptions {
   readonly evidencePutFailsOnce?: boolean;
   readonly artifactStaging?: boolean;
   readonly runtimeActivatedAfterAttempt?: boolean;
+  readonly lifecycleGoverned?: boolean;
+  readonly lifecycleWithoutRuntime?: boolean;
+  readonly tamperLifecycleGovernance?: boolean;
 }
 
 async function createFixture(options: FixtureOptions = {}) {
@@ -467,7 +530,7 @@ async function createFixture(options: FixtureOptions = {}) {
     { reference: compiler, content: compilerContent }
   ];
   const runtimeResolver = new InMemoryHistoricalRuntimeResolver([runtime], resolvedBundles);
-  const certificationRuntime = options.runtimeActivatedAfterAttempt
+  const certificationRuntime = options.runtimeActivatedAfterAttempt || (options.lifecycleGoverned && !options.lifecycleWithoutRuntime)
     ? {
         forCertification: ({ tenantId, certifiedAt }: { readonly tenantId: string; readonly certifiedAt: string }) => ({
           resolveActivatedRuntime: (reference: { readonly runtimeBundleId: string; readonly runtimeBundleHash: string }) => ({
@@ -479,7 +542,13 @@ async function createFixture(options: FixtureOptions = {}) {
               tenantId,
               runtimeBundleId: runtime.runtimeBundleId,
               runtimeBundleHash: runtime.runtimeBundleHash,
-              activatedAt: `${certifiedAt.slice(0, -5)}01.000Z`
+              registeredBy: "runtime-maker",
+              registeredAt: "2026-06-01T00:00:00.000Z",
+              activatedBy: "runtime-checker",
+              activatedAt: options.runtimeActivatedAfterAttempt
+                ? `${certifiedAt.slice(0, -5)}01.000Z`
+                : "2026-07-01T00:00:00.000Z",
+              activationHash: hash("runtime-activation")
             }
           }),
           resolveRuntimeBundle: runtimeResolver.resolveRuntimeBundle.bind(runtimeResolver),
@@ -614,6 +683,7 @@ async function createFixture(options: FixtureOptions = {}) {
       );
   let sourceLoads = 0;
   let definitionLoads = 0;
+  let lifecycleDefinitionLoads = 0;
   let artifactWrites = 0;
   const artifactIds: string[] = [];
   let deliveryLoads = 0;
@@ -667,6 +737,13 @@ async function createFixture(options: FixtureOptions = {}) {
         sourceContract: compromisedSource,
         scopeBinding: options.forgeBindingDocument ? forgedBinding : capture.scopeBinding
       } as GovernedSourceDeliveryResolutionV1;
+  const lifecycleGovernance = lifecycleGovernanceFixture({
+    snapshot,
+    scopeBinding: capture.scopeBinding,
+    mappingSpec,
+    runtime,
+    definitions
+  });
   const service = new ModernSnapshotCertificationService({
     snapshots: repositories.datasetSnapshots,
     receipts,
@@ -710,6 +787,37 @@ async function createFixture(options: FixtureOptions = {}) {
         return definitions;
       }
     },
+    ...(options.lifecycleGoverned
+      ? {
+          lifecycleDefinitions: {
+            async resolveForCertificationAttemptDetailed(input: {
+              readonly evidence: {
+                readonly extractionReceipt: ModernSnapshotExtractionReceiptV1;
+                readonly scopeBinding: GovernedDatasetScopeBindingV1;
+              };
+              readonly attempt: SnapshotCertificationAttemptV1;
+            }) {
+              lifecycleDefinitionLoads += 1;
+              assert.equal(input.evidence.extractionReceipt.receiptHash, capture.receipt.receiptHash);
+              assert.equal(input.evidence.scopeBinding.bindingHash, capture.scopeBinding.bindingHash);
+              assert.equal(input.attempt.snapshotId, snapshot.snapshotId);
+              const governance = options.tamperLifecycleGovernance
+                ? {
+                    ...lifecycleGovernance,
+                    runtime: {
+                      ...lifecycleGovernance.runtime,
+                      runtimeBundleHash: hash("substituted-runtime")
+                    }
+                  }
+                : lifecycleGovernance;
+              return { resolution: definitions, governance };
+            },
+            async resolveForCertificationAttempt() {
+              throw new Error("service must use detailed lifecycle authority");
+            }
+          }
+        }
+      : {}),
     runtime: runtimeResolver,
     ...(certificationRuntime === undefined ? {} : { certificationRuntime }),
     dimensions: { async resolveForMapping() { return []; } },
@@ -743,6 +851,7 @@ async function createFixture(options: FixtureOptions = {}) {
     artifacts,
     get sourceLoads() { return sourceLoads; },
     get definitionLoads() { return definitionLoads; },
+    get lifecycleDefinitionLoads() { return lifecycleDefinitionLoads; },
     get artifactWrites() { return artifactWrites; },
     get artifactIds() { return [...artifactIds]; },
     get deliveryLoads() { return deliveryLoads; },
@@ -1056,6 +1165,133 @@ function sourcePopulation(
     sectionSchemaHash: section.schemaHash,
     controlPopulationHash: section.controlPopulationHash,
     records
+  };
+}
+
+function lifecycleGovernanceFixture(input: {
+  readonly snapshot: DatasetSnapshotV2;
+  readonly scopeBinding: GovernedDatasetScopeBindingV1;
+  readonly mappingSpec: ReturnType<typeof createMappingSpecV2>;
+  readonly runtime: ReturnType<typeof createHistoricalRuntimeBundleV1>;
+  readonly definitions: ModernCertificationDefinitionResolutionV1;
+}): CertifiedSnapshotEvidenceRecordV2["governance"] {
+  const source = input.snapshot.sourceContract;
+  const sourceExecution = {
+    definitionVersionId: "source-version-1",
+    definitionKey: "loan-source",
+    kind: "source_contract" as const,
+    semanticVersion: "1.0.0",
+    versionHash: hash("source-version"),
+    documentHash: hash("source-document"),
+    approvalEventHash: hash("source-approval"),
+    sourceContract: source
+  };
+  const scopeExecution = {
+    definitionVersionId: "scope-version-1",
+    definitionKey: input.scopeBinding.bindingId,
+    kind: "dataset_scope_binding" as const,
+    semanticVersion: "1.0.0",
+    versionHash: hash("scope-version"),
+    documentHash: hash("scope-document"),
+    approvalEventHash: hash("scope-approval"),
+    bindingId: input.scopeBinding.bindingId,
+    revision: input.scopeBinding.revision,
+    bindingHash: input.scopeBinding.bindingHash,
+    sourceContract: source
+  };
+  const mappingActivation = {
+    status: "active" as const,
+    lifecycleRevision: 4,
+    activatedBy: "mapping-checker",
+    activatedAt: "2026-07-01T00:00:00.000Z",
+    activationEventHash: hash("mapping-activation")
+  };
+  const mappingExecution = {
+    definitionVersionId: "mapping-version-1",
+    definitionKey: input.mappingSpec.mappingKey,
+    kind: "mapping_spec" as const,
+    semanticVersion: "1.0.0",
+    versionHash: hash("mapping-version"),
+    documentHash: hash("mapping-document"),
+    approvalEventHash: hash("mapping-approval"),
+    mappingSpecId: input.mappingSpec.mappingSpecId,
+    mappingSpecRevision: input.mappingSpec.revision,
+    mappingSpecHash: input.mappingSpec.mappingSpecHash,
+    sourceContract: source,
+    activation: mappingActivation,
+    window: input.definitions.mappingWindow
+  };
+  const definition = createSnapshotCertificationDefinitionV1({
+    contractVersion: 1,
+    definitionKind: "snapshot_certification_control",
+    tenantId: input.snapshot.tenantId,
+    certificationDefinitionId: input.scopeBinding.bindingId,
+    revision: 1,
+    sourceContract: source,
+    sourceContractExecution: sourceExecution,
+    scopeBinding: input.scopeBinding,
+    scopeBindingExecution: scopeExecution,
+    mappingExecution,
+    runtime: {
+      runtimeBundleId: input.runtime.runtimeBundleId,
+      runtimeVersion: input.runtime.runtimeVersion,
+      runtimeBundleHash: input.runtime.runtimeBundleHash,
+      dictionary: input.runtime.dictionary,
+      mappingCompiler: input.runtime.mappingCompiler
+    },
+    dataQuality: input.definitions.dataQuality,
+    certificationReconciliation: input.definitions.reconciliation,
+    window: input.definitions.mappingWindow,
+    approval: { status: "pending_durable_approval", authority: "governed_definition_v2_lifecycle" }
+  });
+  const controlApproval = {
+    status: "approved" as const,
+    proposedBy: "control-maker",
+    approvedBy: "control-checker",
+    approvedAt: "2026-07-01T01:00:00.000Z",
+    approvalEventHash: hash("control-approval")
+  };
+  return {
+    control: {
+      definition,
+      reference: {
+        definitionVersionId: "control-version-1",
+        definitionKey: definition.certificationDefinitionId,
+        kind: "snapshot_certification_control",
+        semanticVersion: "1.0.0",
+        versionHash: hash("control-version"),
+        documentHash: hash(definition),
+        approvalEventHash: controlApproval.approvalEventHash
+      },
+      approval: controlApproval,
+      activation: {
+        status: "active",
+        lifecycleRevision: 4,
+        activatedBy: "control-checker",
+        activatedAt: "2026-07-01T02:00:00.000Z",
+        activationEventHash: hash("control-activation")
+      }
+    },
+    sourceContract: { raw: source, execution: sourceExecution },
+    scopeBinding: { raw: input.scopeBinding, execution: scopeExecution },
+    mapping: { execution: mappingExecution, activation: mappingActivation },
+    runtime: {
+      runtimeBundleId: input.runtime.runtimeBundleId,
+      runtimeVersion: input.runtime.runtimeVersion,
+      runtimeBundleHash: input.runtime.runtimeBundleHash,
+      activation: {
+        tenantId: input.snapshot.tenantId,
+        runtimeBundleId: input.runtime.runtimeBundleId,
+        runtimeBundleHash: input.runtime.runtimeBundleHash,
+        registeredBy: "runtime-maker",
+        registeredAt: "2026-06-01T00:00:00.000Z",
+        activatedBy: "runtime-checker",
+        activatedAt: "2026-07-01T00:00:00.000Z",
+        activationHash: hash("runtime-activation")
+      },
+      dictionary: input.runtime.dictionary,
+      mappingCompiler: input.runtime.mappingCompiler
+    }
   };
 }
 

@@ -39,16 +39,28 @@ afterEach(() => {
 test("lifecycle certification authority selects one facility control and replays exact approved lineage", async () => {
   const fixture = fixtureForAuthority();
   try {
-    const resolved = await fixture.authority.resolveForCertificationAttempt({
+    const detailed = await fixture.authority.resolveForCertificationAttemptDetailed({
       evidence: fixture.evidence,
       attempt: fixture.attempt
     });
+    assert.ok(detailed);
+    const resolved = detailed.resolution;
     assert.ok(resolved);
     assert.equal(resolved.mappingSpec.mappingSpecId, "mapping-spec-a");
     assert.equal(resolved.mappingSpec.status, "active");
     assert.equal(resolved.runtime.runtimeBundleId, fixture.runtime.runtimeBundleId);
     assert.equal(resolved.dataQuality.definitionId, "dq-a");
     assert.equal(resolved.reconciliation.reconciliationId, "pool-tie-out");
+    assert.equal(detailed.governance.control.definition.certificationDefinitionId, fixture.evidence.scopeBinding.bindingId);
+    assert.equal(detailed.governance.control.reference.documentHash, canonicalHash(detailed.governance.control.definition));
+    assert.equal(detailed.governance.control.activation.status, "active");
+    assert.equal(detailed.governance.runtime.activation.runtimeBundleHash, fixture.runtime.runtimeBundleHash);
+
+    const compatibility = await fixture.authority.resolveForCertificationAttempt({
+      evidence: fixture.evidence,
+      attempt: fixture.attempt
+    });
+    assert.deepEqual(compatibility, resolved);
   } finally {
     fixture.close();
   }
