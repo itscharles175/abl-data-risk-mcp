@@ -295,6 +295,19 @@ test("certification rejects mismatched runtime/dictionary lineage", async () => 
   }
 });
 
+test("certification rejects runtime activation after its immutable attempt time", async () => {
+  const fixture = await createFixture({ runtimeActivatedAfterAttempt: true });
+  try {
+    await assert.rejects(
+      fixture.service.certify(fixture.request, fixture.actor),
+      certificationCode("INTEGRITY_FAILURE")
+    );
+    assert.equal(fixture.artifactWrites, 0);
+  } finally {
+    fixture.close();
+  }
+});
+
 test("certification fails closed when its deterministic extraction receipt is absent or tampered", async () => {
   const absent = await createFixture({ receiptAbsent: true });
   try {
@@ -399,6 +412,7 @@ interface FixtureOptions {
   readonly effectiveTo?: string;
   readonly evidencePutFailsOnce?: boolean;
   readonly artifactStaging?: boolean;
+  readonly runtimeActivatedAfterAttempt?: boolean;
 }
 
 async function createFixture(options: FixtureOptions = {}) {
@@ -453,6 +467,27 @@ async function createFixture(options: FixtureOptions = {}) {
     { reference: compiler, content: compilerContent }
   ];
   const runtimeResolver = new InMemoryHistoricalRuntimeResolver([runtime], resolvedBundles);
+  const certificationRuntime = options.runtimeActivatedAfterAttempt
+    ? {
+        forCertification: ({ tenantId, certifiedAt }: { readonly tenantId: string; readonly certifiedAt: string }) => ({
+          resolveActivatedRuntime: (reference: { readonly runtimeBundleId: string; readonly runtimeBundleHash: string }) => ({
+            runtime: reference.runtimeBundleId === runtime.runtimeBundleId &&
+              reference.runtimeBundleHash === runtime.runtimeBundleHash
+              ? runtime
+              : (() => { throw new Error("unexpected runtime reference"); })(),
+            activation: {
+              tenantId,
+              runtimeBundleId: runtime.runtimeBundleId,
+              runtimeBundleHash: runtime.runtimeBundleHash,
+              activatedAt: `${certifiedAt.slice(0, -5)}01.000Z`
+            }
+          }),
+          resolveRuntimeBundle: runtimeResolver.resolveRuntimeBundle.bind(runtimeResolver),
+          resolveDictionary: runtimeResolver.resolveDictionary.bind(runtimeResolver),
+          resolveBundle: runtimeResolver.resolveBundle.bind(runtimeResolver)
+        })
+      }
+    : undefined;
   const mappingSpec = createMappingSpecV2({
     contractVersion: 2,
     tenantId: snapshot.tenantId,
@@ -676,6 +711,7 @@ async function createFixture(options: FixtureOptions = {}) {
       }
     },
     runtime: runtimeResolver,
+    ...(certificationRuntime === undefined ? {} : { certificationRuntime }),
     dimensions: { async resolveForMapping() { return []; } },
     artifacts: {
       putJson(input) {

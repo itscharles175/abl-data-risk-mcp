@@ -308,6 +308,34 @@ export interface ModernMappingDimensionAuthorityV1 {
   }): Promise<readonly MappingDimensionLookupV1[]>;
 }
 
+/**
+ * Production certification runtime boundary. It resolves activation at the
+ * immutable attempt timestamp, then exposes only components proven to belong
+ * to that exact runtime. The legacy historical resolver remains available for
+ * migration/test fixtures that do not claim lifecycle activation authority.
+ */
+export interface ActivatedCertificationRuntimeResolverV1 extends HistoricalRuntimeResolver {
+  resolveActivatedRuntime(reference: {
+    readonly runtimeBundleId: string;
+    readonly runtimeBundleHash: Sha256Hash;
+  }): {
+    readonly runtime: HistoricalRuntimeBundleV1;
+    readonly activation: {
+      readonly tenantId: string;
+      readonly runtimeBundleId: string;
+      readonly runtimeBundleHash: Sha256Hash;
+      readonly activatedAt: string;
+    };
+  };
+}
+
+export interface CertificationRuntimeAuthorityFactoryV1 {
+  forCertification(input: {
+    readonly tenantId: string;
+    readonly certifiedAt: string;
+  }): ActivatedCertificationRuntimeResolverV1;
+}
+
 export interface ModernSnapshotCertificationServiceDependencies {
   readonly snapshots: Pick<ImmutableRepositoryPort<DatasetSnapshotV2>, "get">;
   readonly receipts: ModernSnapshotExtractionReceiptAuthorityV1;
@@ -325,6 +353,8 @@ export interface ModernSnapshotCertificationServiceDependencies {
   readonly runtime: HistoricalRuntimeResolver;
   readonly dimensions: ModernMappingDimensionAuthorityV1;
   readonly artifacts: Pick<ArtifactStore, "getJson" | "putJson">;
+  /** Required by production composition; legacy test/migration paths use runtime directly. */
+  readonly certificationRuntime?: CertificationRuntimeAuthorityFactoryV1;
   readonly now: () => string;
 }
 
@@ -454,7 +484,7 @@ export class ModernSnapshotCertificationService {
     const source = sourceSections.get(resolution.dataQuality.mappingSectionId);
     if (!source) fail("MISSING_REQUIRED_EVIDENCE", "Mapped source section evidence was not found");
 
-    const runtime = await this.#resolveRuntime(resolution, certifiedAt);
+    const runtime = await this.#resolveRuntime(resolution, actor.tenantId, certifiedAt);
     const dimensions = await this.#dependencies.dimensions.resolveForMapping({
       tenantId: actor.tenantId,
       mappingSpec: resolution.mappingSpec
@@ -1065,13 +1095,20 @@ export class ModernSnapshotCertificationService {
 
   async #resolveRuntime(
     resolution: ModernCertificationDefinitionResolutionV1,
+    tenantId: string,
     certifiedAt: string
   ): Promise<HistoricalRuntimeBundleV1> {
+    const reference = {
+      runtimeBundleId: resolution.runtime.runtimeBundleId,
+      runtimeBundleHash: resolution.runtime.runtimeBundleHash
+    };
+    const activatedRuntime = this.#dependencies.certificationRuntime?.forCertification({
+      tenantId,
+      certifiedAt
+    });
+    const activated = activatedRuntime?.resolveActivatedRuntime(reference);
     const runtime = parseHistoricalRuntimeBundleV1(
-      await this.#dependencies.runtime.resolveRuntimeBundle({
-        runtimeBundleId: resolution.runtime.runtimeBundleId,
-        runtimeBundleHash: resolution.runtime.runtimeBundleHash
-      })
+      activated?.runtime ?? await this.#dependencies.runtime.resolveRuntimeBundle(reference)
     );
     if (
       runtime.runtimeBundleId !== resolution.runtime.runtimeBundleId ||
@@ -1081,14 +1118,25 @@ export class ModernSnapshotCertificationService {
     ) {
       fail("INTEGRITY_FAILURE", "Historical runtime does not match the activated mapping lineage");
     }
+    if (
+      activated !== undefined &&
+      (activated.activation.tenantId !== tenantId ||
+        activated.activation.runtimeBundleId !== runtime.runtimeBundleId ||
+        activated.activation.runtimeBundleHash !== runtime.runtimeBundleHash ||
+        activated.activation.activatedAt > certifiedAt)
+    ) {
+      fail("INTEGRITY_FAILURE", "Certification runtime activation did not bind the immutable attempt time");
+    }
     const references = [runtime.dictionary, runtime.mappingCompiler, ...runtime.methodologies];
     if (references.some((reference) => reference.createdAt > runtime.assembledAt)) {
       fail("INTEGRITY_FAILURE", "Historical runtime contains a bundle created after assembly");
     }
     await Promise.all([
-      this.#dependencies.runtime.resolveDictionary(runtime.dictionary),
-      this.#dependencies.runtime.resolveBundle(runtime.mappingCompiler),
-      ...runtime.methodologies.map((reference) => this.#dependencies.runtime.resolveBundle(reference))
+      (activatedRuntime ?? this.#dependencies.runtime).resolveDictionary(runtime.dictionary),
+      (activatedRuntime ?? this.#dependencies.runtime).resolveBundle(runtime.mappingCompiler),
+      ...runtime.methodologies.map((reference) =>
+        (activatedRuntime ?? this.#dependencies.runtime).resolveBundle(reference)
+      )
     ]);
     return runtime;
   }
