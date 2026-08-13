@@ -86,7 +86,10 @@ const DatasetSnapshotBodyV2Schema = z
       .string()
       .min(1)
       .max(2_048)
-      .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), "must not contain control characters"),
+      .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), "must not contain control characters")
+      .refine((value) => !containsCredentialMaterial(value), {
+        message: "must be an opaque locator without embedded credentials or secret query parameters"
+      }),
     immutableSourceVersion: z.string().min(1).max(1_024).optional(),
     asOfDate: IsoDateSchema,
     knowledge: z
@@ -242,4 +245,15 @@ function normalizeLegacyHash(value: string): `sha256:${string}` {
     throw new ContractValidationError("INVALID_HASH", "Legacy snapshot content hash is invalid");
   }
   return parsed.data;
+}
+
+function containsCredentialMaterial(value: string): boolean {
+  return (
+    /:\/\/[^/?#\s]*@/u.test(value) ||
+    /(?:^|[?&;,\s])(?:password|passwd|pwd|secret|token|access[_-]?token|api[_-]?key|access[_-]?key)\s*[=:]\s*[^\s&;,]+/iu.test(
+      value
+    ) ||
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/u.test(value) ||
+    /\bBearer\s+[A-Za-z0-9._~+/-]+=*/u.test(value)
+  );
 }

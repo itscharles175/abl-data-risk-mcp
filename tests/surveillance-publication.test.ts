@@ -329,7 +329,7 @@ test("trusted publication service accepts IDs only and rejects authority substit
     tenantId: expected.tenantId,
     publicationId: expected.publicationId,
     certificationManifestId: expected.certification.certificationManifestId,
-    datasetBindingId: expected.datasetBinding.bindingId,
+    datasetBindingDefinitionVersionId: "dataset-binding-definition-v1",
     datasetSnapshotId: expected.snapshot.snapshotId,
     sourceContractDefinitionVersionId: expected.sourceContract.definition.definitionVersionId,
     idempotencyKey: "service-publish"
@@ -608,6 +608,8 @@ function publicationFixture(): CertifiedSnapshotPublicationV1 {
     mappingApplication,
     normalizedArtifact: {
       artifactId: certificationBody.normalizedArtifactId,
+      artifactContractVersion: 2,
+      artifactHash: hash("normalized-artifact-contract"),
       kind: "normalized_snapshot",
       mediaType: "application/json",
       contentHash: certificationBody.normalizedArtifactContentHash,
@@ -714,18 +716,37 @@ function authorityFor(
   const evidence = overrides.evidence ?? authorityEvidence(publication);
   return {
     resolveDatasetSnapshotV2: () => snapshot,
-    resolveDatasetBinding: () => {
+    resolveFrozenDatasetBinding: () => {
       const binding = overrides.datasetBinding ?? publication.datasetBinding;
       const body = {
         contractVersion: binding.contractVersion,
         bindingId: binding.bindingId,
         tenantId: binding.tenantId,
+        revision: 1,
         datasetId: binding.datasetId,
         sourceContract: snapshot.sourceContract,
         scope: binding.scope,
-        boundAt: binding.boundAt
+        effectiveFrom: "2026-01-01"
       };
-      return { ...body, bindingHash: canonicalHash(body) };
+      return {
+        reference: {
+          definitionVersionId: "dataset-binding-definition-v1",
+          definitionKey: binding.bindingId,
+          kind: "dataset_scope_binding" as const,
+          semanticVersion: "1.0.0",
+          versionHash: hash("binding-definition-version"),
+          documentHash: hash("binding-definition-document"),
+          approvalEventHash: hash("binding-definition-approval")
+        },
+        approvalEvidence: {
+          status: "approved" as const,
+          proposedBy: "binding-maker",
+          approvedBy: "binding-checker",
+          approvedAt: binding.boundAt,
+          approvalEventHash: hash("binding-definition-approval")
+        },
+        executionDocument: { ...body, bindingHash: canonicalHash(body) }
+      };
     },
     resolveFrozenSourceContract: () => ({
       reference: publication.sourceContract.definition,
@@ -817,6 +838,10 @@ function authorityEvidence(publication: CertifiedSnapshotPublicationV1): Certifi
     population: publication.population,
     mappingSpec: { ...mappingSpecBody, mappingSpecHash: canonicalHash(mappingSpecBody) },
     mappingApplication: publication.mappingApplication,
+    normalizedArtifactIdentity: {
+      artifactContractVersion: publication.normalizedArtifact.artifactContractVersion,
+      artifactHash: publication.normalizedArtifact.artifactHash
+    },
     normalizedArtifact: {
       artifactId: publication.normalizedArtifact.artifactId.slice("sha256:".length),
       tenantBinding: hash("tenant-binding").slice("sha256:".length),

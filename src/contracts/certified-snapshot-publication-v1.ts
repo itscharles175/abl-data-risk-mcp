@@ -232,6 +232,8 @@ export type CertificationManifestPublicationV1 = Readonly<
 const NormalizedArtifactPublicationV1Schema = z
   .object({
     artifactId: IdentifierSchema,
+    artifactContractVersion: z.literal(2).optional(),
+    artifactHash: Sha256HashSchema.optional(),
     kind: z.literal("normalized_snapshot"),
     mediaType: z.literal("application/json"),
     contentHash: Sha256HashSchema,
@@ -242,7 +244,16 @@ const NormalizedArtifactPublicationV1Schema = z
     populationHash: Sha256HashSchema,
     fieldSetHash: Sha256HashSchema
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.artifactContractVersion === undefined) !== (value.artifactHash === undefined)) {
+      issue(
+        context,
+        ["artifactHash"],
+        "artifactContractVersion and artifactHash must be supplied together"
+      );
+    }
+  });
 
 const CertifiedSnapshotPublicationBodyV1Schema = z
   .object({

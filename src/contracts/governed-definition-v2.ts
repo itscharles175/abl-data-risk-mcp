@@ -26,6 +26,7 @@ import {
   parseWithSchema,
   type CanonicalJsonValue
 } from "./canonical.js";
+import { parseGovernedDatasetScopeBindingV1 } from "./dataset-scope-binding-v1.js";
 import { parseMappingSpecV2 } from "./mapping-v2.js";
 import { parseMetricProjectionV1 } from "./metric-projection-v1.js";
 import { parseSourceAccessPolicyV1 } from "./source-access-policy-v1.js";
@@ -34,6 +35,7 @@ import { parseSourceContractV1 } from "./source-contract-v1.js";
 export const GovernedDefinitionKindV2Schema = z.enum([
   "source_contract",
   "source_access_policy",
+  "dataset_scope_binding",
   "mapping_spec",
   "methodology_bundle",
   "borrowing_base_policy_v2",
@@ -500,6 +502,7 @@ export function computeDefinitionImpactPreviewV1(
   const capabilityMap: Record<GovernedDefinitionKindV2, readonly string[]> = {
     source_contract: ["certification", "ingestion"],
     source_access_policy: ["analytics", "authorization", "certification"],
+    dataset_scope_binding: ["authorization", "certification", "portfolio_scope"],
     mapping_spec: ["certification", "mapping"],
     methodology_bundle: ["analytics", "replay"],
     borrowing_base_policy_v2: ["borrowing_base", "monitoring"],
@@ -561,6 +564,14 @@ export function validateGovernedDefinitionDocumentV2(
         const parsed = parseSourceAccessPolicyV1(document);
         tenantMatch(parsed.tenantId, tenantId, kind);
         logicalIdentity(parsed.policyId, definitionKey, kind);
+        documentVersion(parsed.revision, semanticVersion, kind);
+        effectivityMatch(parsed.effectiveFrom, parsed.effectiveTo, effectiveFrom, effectiveTo, kind);
+        return canonicalClone(parsed, `${kind} document`);
+      }
+      case "dataset_scope_binding": {
+        const parsed = parseGovernedDatasetScopeBindingV1(document);
+        tenantMatch(parsed.tenantId, tenantId, kind);
+        logicalIdentity(parsed.bindingId, definitionKey, kind);
         documentVersion(parsed.revision, semanticVersion, kind);
         effectivityMatch(parsed.effectiveFrom, parsed.effectiveTo, effectiveFrom, effectiveTo, kind);
         return canonicalClone(parsed, `${kind} document`);

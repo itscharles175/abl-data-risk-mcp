@@ -653,6 +653,82 @@ export type PortfolioSurveillanceDefinitionLineageV1 = Readonly<
   z.infer<typeof DefinitionLineageSchema>
 >;
 
+const SourceAccessPolicyAuthorityReferenceV1Schema = z
+  .object({
+    definitionVersionId: IdentifierSchema,
+    definitionKey: IdentifierSchema,
+    semanticVersion: SemanticVersionV2Schema,
+    versionHash: Sha256HashSchema,
+    documentHash: Sha256HashSchema,
+    approvalEventHash: Sha256HashSchema,
+    executionDocumentHash: Sha256HashSchema,
+    policyId: IdentifierSchema,
+    revision: z.number().int().positive().max(1_000_000),
+    policyHash: Sha256HashSchema,
+    effectiveFrom: IsoDateSchema,
+    effectiveTo: IsoDateSchema.nullable()
+  })
+  .strict();
+
+const DatasetScopeBindingAuthorityReferenceV1Schema = z
+  .object({
+    definitionVersionId: IdentifierSchema,
+    definitionKey: IdentifierSchema,
+    semanticVersion: SemanticVersionV2Schema,
+    versionHash: Sha256HashSchema,
+    documentHash: Sha256HashSchema,
+    approvalEventHash: Sha256HashSchema,
+    executionDocumentHash: Sha256HashSchema,
+    bindingId: IdentifierSchema,
+    revision: z.number().int().positive().max(1_000_000),
+    bindingHash: Sha256HashSchema,
+    effectiveFrom: IsoDateSchema,
+    effectiveTo: IsoDateSchema.nullable()
+  })
+  .strict();
+
+const PortfolioSurveillanceGovernanceBindingsV1Schema = z
+  .object({
+    metadataHash: Sha256HashSchema,
+    preflightHash: Sha256HashSchema,
+    sourceSelectionHash: Sha256HashSchema,
+    sourceIdentityHash: Sha256HashSchema,
+    sourceAccessPolicies: z
+      .array(SourceAccessPolicyAuthorityReferenceV1Schema)
+      .min(1)
+      .max(1_000),
+    sourceAccessPolicySetHash: Sha256HashSchema,
+    datasetScopeBindings: z
+      .array(DatasetScopeBindingAuthorityReferenceV1Schema)
+      .min(1)
+      .max(MAXIMUM_SOURCE_REFERENCES),
+    datasetScopeBindingSetHash: Sha256HashSchema
+  })
+  .strict()
+  .superRefine((value, context) => {
+    for (const [field, values, expectedHash] of [
+      ["sourceAccessPolicies", value.sourceAccessPolicies, value.sourceAccessPolicySetHash],
+      ["datasetScopeBindings", value.datasetScopeBindings, value.datasetScopeBindingSetHash]
+    ] as const) {
+      const ids = values.map(({ definitionVersionId }) => definitionVersionId);
+      if (
+        new Set(ids).size !== ids.length ||
+        canonicalJson([...ids].sort(compare)) !== canonicalJson(ids) ||
+        canonicalHash(values) !== expectedHash
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: "must be uniquely ordered and exactly hash-bound"
+        });
+      }
+    }
+  });
+
+export type PortfolioSurveillanceGovernanceBindingsV1 = Readonly<
+  z.infer<typeof PortfolioSurveillanceGovernanceBindingsV1Schema>
+>;
+
 export interface PortfolioSurveillanceExecutionPlanV1 {
   readonly contractVersion: 1;
   readonly operation: typeof OPERATION;
@@ -667,6 +743,8 @@ export interface PortfolioSurveillanceExecutionPlanV1 {
   readonly definitionSetHash: Sha256Hash;
   readonly requestedFields: readonly string[];
   readonly requestedFieldsHash: Sha256Hash;
+  /** Required by governed v4 execution; absent only on legacy standalone v1 plans. */
+  readonly governanceBindings?: PortfolioSurveillanceGovernanceBindingsV1;
   readonly engineInput: PortfolioSurveillanceInputV1;
   readonly planHash: Sha256Hash;
 }
@@ -849,6 +927,12 @@ export async function preparePortfolioSurveillanceExecutionPlanV1(
 export function parsePortfolioSurveillanceExecutionPlanV1(
   value: unknown
 ): PortfolioSurveillanceExecutionPlanV1 {
+  const candidate = value as Readonly<Record<string, unknown>>;
+  const hasGovernanceBindings =
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(candidate, "governanceBindings");
   const record = strictRecord(value, [
     "contractVersion",
     "definitionLineage",
@@ -864,7 +948,8 @@ export function parsePortfolioSurveillanceExecutionPlanV1(
     "requestedFieldsHash",
     "sourceLineage",
     "sourceSetHash",
-    "tenantId"
+    "tenantId",
+    ...(hasGovernanceBindings ? ["governanceBindings"] : [])
   ], "PortfolioSurveillanceExecutionPlanV1");
   const planHash = hashValue(record.planHash, "planHash");
   const { planHash: _planHash, ...body } = record;
@@ -938,6 +1023,13 @@ export function parsePortfolioSurveillanceExecutionPlanV1(
     definitionLineage,
     requestedFields
   );
+  const governanceBindings = hasGovernanceBindings
+    ? parseWithSchema(
+        PortfolioSurveillanceGovernanceBindingsV1Schema,
+        record.governanceBindings,
+        "portfolio surveillance governance bindings"
+      )
+    : undefined;
   return deepFreeze({
     contractVersion: 1,
     operation: OPERATION,
@@ -952,8 +1044,35 @@ export function parsePortfolioSurveillanceExecutionPlanV1(
     definitionSetHash: hashValue(record.definitionSetHash, "definitionSetHash"),
     requestedFields,
     requestedFieldsHash: hashValue(record.requestedFieldsHash, "requestedFieldsHash"),
+    ...(governanceBindings === undefined ? {} : { governanceBindings }),
     engineInput,
     planHash
+  });
+}
+
+/**
+ * Adds the exact frozen policy and dataset-binding authority used by metadata
+ * preflight. Legacy standalone v1 plans remain parseable, but governed v4
+ * execution requires this extension and independently rebinds every hash.
+ */
+export function bindPortfolioSurveillanceGovernanceV1(
+  planValue: PortfolioSurveillanceExecutionPlanV1,
+  bindingsValue: PortfolioSurveillanceGovernanceBindingsV1
+): PortfolioSurveillanceExecutionPlanV1 {
+  const plan = parsePortfolioSurveillanceExecutionPlanV1(planValue);
+  if (plan.governanceBindings !== undefined) {
+    invalid("PLAN_INTEGRITY_FAILURE", "Surveillance plan governance is already bound");
+  }
+  const bindings = parseWithSchema(
+    PortfolioSurveillanceGovernanceBindingsV1Schema,
+    bindingsValue,
+    "portfolio surveillance governance bindings"
+  );
+  const { planHash: _planHash, ...legacyBody } = plan;
+  const body = { ...legacyBody, governanceBindings: bindings };
+  return parsePortfolioSurveillanceExecutionPlanV1({
+    ...body,
+    planHash: canonicalHash(body)
   });
 }
 

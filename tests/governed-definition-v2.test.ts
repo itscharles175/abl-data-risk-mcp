@@ -1003,7 +1003,7 @@ test("the shipped schema-v1 event history migrates atomically before withdrawal 
   database.close();
 });
 
-test("the exact shipped schema-v2 kind constraint migrates to v3 without rewriting evidence", () => {
+test("the exact shipped schema-v2 kind constraint migrates through v4 without rewriting evidence", () => {
   const directory = mkdtempSync(join(tmpdir(), "abl-governed-definition-v3-migration-"));
   directories.push(directory);
   const databasePath = join(directory, "control.sqlite");
@@ -1050,11 +1050,122 @@ test("the exact shipped schema-v2 kind constraint migrates to v3 without rewriti
   );
   const versionsSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'governed_definition_v2_versions'").get() as { sql: string }).sql;
   assert.match(versionsSql, /'source_access_policy'/);
+  assert.match(versionsSql, /'dataset_scope_binding'/);
   assert.equal(
     (database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'governed_definition_v2_events'").get() as { seq: number }).seq,
     71
   );
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("the exact shipped schema-v3 kind constraint migrates to v4 without rewriting evidence", () => {
+  const directory = mkdtempSync(join(tmpdir(), "abl-governed-definition-v4-migration-"));
+  directories.push(directory);
+  const databasePath = join(directory, "control.sqlite");
+  let clockIndex = 0;
+  const clock = () => new Date(TIMES[clockIndex++] ?? "2026-08-12T13:00:00.000Z");
+  const initial = new GovernedDefinitionV2Store(databasePath, { clock });
+  const request = proposal("metric-migrate-v3", "1.0.0", "2026-01-01", 12);
+  const proposed = initial.propose(request);
+  const validated = transition(initial, proposed, "validated", "checker-a", "migrate-v3-validate");
+  const approved = transition(initial, validated, "approved", "checker-a", "migrate-v3-approve");
+  const beforeEvents = initial.listAuditEvents("tenant-a");
+  const beforeVersionHash = approved.version.versionHash;
+  initial.close();
+
+  downgradeGovernedDefinitionVersionsToShippedV3(databasePath);
+  const sequenceDatabase = new DatabaseSync(databasePath);
+  assert.equal(
+    (
+      sequenceDatabase
+        .prepare(
+          "SELECT schema_version FROM component_schema_versions WHERE component_name = ?"
+        )
+        .get(GOVERNED_DEFINITION_V2_STORE_COMPONENT) as { schema_version: number }
+    ).schema_version,
+    3
+  );
+  const shippedV3Sql = (
+    sequenceDatabase
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'governed_definition_v2_versions'"
+      )
+      .get() as { sql: string }
+  ).sql;
+  assert.match(shippedV3Sql, /'source_access_policy'/);
+  assert.equal(shippedV3Sql.includes("dataset_scope_binding"), false);
+  const sequenceUpdate = sequenceDatabase
+    .prepare("UPDATE sqlite_sequence SET seq = 90 WHERE name = 'governed_definition_v2_events'")
+    .run();
+  assert.equal(sequenceUpdate.changes, 1);
+  const shippedV3Rows = governedDefinitionStorageRows(sequenceDatabase);
+  sequenceDatabase.close();
+
+  const migrated = new GovernedDefinitionV2Store(databasePath, { clock });
+  assert.deepEqual(migrated.listAuditEvents("tenant-a"), beforeEvents);
+  assert.equal(
+    migrated.get("tenant-a", approved.version.definitionVersionId)?.version.versionHash,
+    beforeVersionHash
+  );
+  assert.equal(migrated.propose(request).version.versionHash, beforeVersionHash);
+  const postMigrationDatabase = new DatabaseSync(databasePath);
+  assert.deepEqual(governedDefinitionStorageRows(postMigrationDatabase), shippedV3Rows);
+  assert.deepEqual(postMigrationDatabase.prepare("PRAGMA foreign_key_check").all(), []);
+  postMigrationDatabase.close();
+  const withdrawn = migrated.transition({
+    tenantId: "tenant-a",
+    definitionVersionId: approved.version.definitionVersionId,
+    toStatus: "withdrawn",
+    expectedRevision: approved.lifecycleRevision,
+    actor: "checker-b",
+    evidence: { reason: "v3 migration high-water check" },
+    idempotencyKey: "migrate-v3-withdraw"
+  });
+  assert.equal(withdrawn.status, "withdrawn");
+  assert.equal(migrated.listAuditEvents("tenant-a").at(-1)?.sequence, 91);
+  migrated.close();
+
+  const database = new DatabaseSync(databasePath);
+  assert.equal(
+    (
+      database
+        .prepare(
+          "SELECT schema_version FROM component_schema_versions WHERE component_name = ?"
+        )
+        .get(GOVERNED_DEFINITION_V2_STORE_COMPONENT) as { schema_version: number }
+    ).schema_version,
+    GOVERNED_DEFINITION_V2_STORE_SCHEMA_VERSION
+  );
+  const versionsSql = (
+    database
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'governed_definition_v2_versions'"
+      )
+      .get() as { sql: string }
+  ).sql;
+  assert.match(versionsSql, /'dataset_scope_binding'/);
+  assert.equal(
+    (
+      database
+        .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'governed_definition_v2_events'")
+        .get() as { seq: number }
+    ).seq,
+    91
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  assert.throws(
+    () => database.prepare("UPDATE governed_definition_v2_versions SET document_json = '{}'").run(),
+    /immutable/
+  );
+  assert.throws(
+    () => database.prepare("DELETE FROM governed_definition_v2_idempotency").run(),
+    /immutable/
+  );
+  assert.throws(
+    () => database.prepare("UPDATE governed_definition_v2_events SET actor = 'tamper'").run(),
+    /append-only/
+  );
   database.close();
 });
 
@@ -1190,6 +1301,29 @@ function downgradeGovernedDefinitionEventsToShippedV1(databasePath: string): voi
 }
 
 function downgradeGovernedDefinitionVersionsToShippedV2(databasePath: string): void {
+  downgradeGovernedDefinitionVersions(
+    databasePath,
+    ",'source_access_policy','dataset_scope_binding'",
+    ["source_access_policy", "dataset_scope_binding"],
+    2
+  );
+}
+
+function downgradeGovernedDefinitionVersionsToShippedV3(databasePath: string): void {
+  downgradeGovernedDefinitionVersions(
+    databasePath,
+    ",'dataset_scope_binding'",
+    ["dataset_scope_binding"],
+    3
+  );
+}
+
+function downgradeGovernedDefinitionVersions(
+  databasePath: string,
+  removedKindSql: string,
+  absentKinds: readonly string[],
+  schemaVersion: 2 | 3
+): void {
   const database = new DatabaseSync(databasePath);
   const sql = (type: "table" | "index" | "trigger", name: string): string => {
     const row = database
@@ -1198,11 +1332,10 @@ function downgradeGovernedDefinitionVersionsToShippedV2(databasePath: string): v
     assert.ok(row?.sql, `${type} ${name}`);
     return row.sql;
   };
-  const versionTableSql = sql("table", "governed_definition_v2_versions").replace(
-    ",'source_access_policy'",
-    ""
-  );
-  assert.equal(versionTableSql.includes("source_access_policy"), false);
+  const currentVersionTableSql = sql("table", "governed_definition_v2_versions");
+  assert.equal(currentVersionTableSql.includes(removedKindSql), true);
+  const versionTableSql = currentVersionTableSql.replace(removedKindSql, "");
+  for (const kind of absentKinds) assert.equal(versionTableSql.includes(kind), false);
   const eventTableSql = sql("table", "governed_definition_v2_events");
   const idempotencyTableSql = sql("table", "governed_definition_v2_idempotency");
   const versionIndexSql = sql("index", "governed_definition_v2_key");
@@ -1259,13 +1392,35 @@ function downgradeGovernedDefinitionVersionsToShippedV2(databasePath: string): v
     DROP TABLE governed_definition_v2_events_v3;
     DROP TABLE governed_definition_v2_versions_v3;
     UPDATE component_schema_versions
-       SET schema_version = 2
+       SET schema_version = ${schemaVersion}
      WHERE component_name = '${GOVERNED_DEFINITION_V2_STORE_COMPONENT}';
     COMMIT;
     PRAGMA foreign_keys = ON;
   `);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
+}
+
+function governedDefinitionStorageRows(database: DatabaseSync): Readonly<{
+  readonly versions: readonly unknown[];
+  readonly events: readonly unknown[];
+  readonly idempotency: readonly unknown[];
+}> {
+  return {
+    versions: database
+      .prepare(
+        "SELECT * FROM governed_definition_v2_versions ORDER BY tenant_id, definition_version_id"
+      )
+      .all(),
+    events: database
+      .prepare("SELECT * FROM governed_definition_v2_events ORDER BY sequence")
+      .all(),
+    idempotency: database
+      .prepare(
+        "SELECT * FROM governed_definition_v2_idempotency ORDER BY tenant_id, operation, actor, idempotency_key"
+      )
+      .all()
+  };
 }
 
 function fixture(): { store: GovernedDefinitionV2Store } {

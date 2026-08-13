@@ -120,6 +120,19 @@ test("MappingSpecV2 is reusable across snapshots while applications bind each hi
   );
 });
 
+test("DatasetSnapshotV2 rejects credential-bearing source locators", () => {
+  for (const sourceLocator of [
+    "postgres://user:password@example.test/loans",
+    "object://bucket/loans.parquet?access_token=secret-value",
+    "Bearer eyJhbGciOiJub25lIn0.payload.signature"
+  ]) {
+    assert.throws(
+      () => datasetSnapshot({ sourceLocator }),
+      (error: unknown) => contractError(error, "INVALID_CONTRACT")
+    );
+  }
+});
+
 test("MappingSpecV2 supports a bounded declarative AST and an explicit v1 bridge", () => {
   const source = sourceContract();
   const runtime = runtimeBundle();

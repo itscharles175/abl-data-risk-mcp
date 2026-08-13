@@ -8,6 +8,7 @@ import {
   parseDatasetScopeBindingV1,
   parseDataPopulationCertificationV1,
   parseDatasetSnapshotV2,
+  parseGovernedDatasetScopeBindingV1,
   parseMappingApplicationV1,
   parseMappingSpecV2,
   parseSourceContractV1,
@@ -15,7 +16,6 @@ import {
   type CertificationManifestPublicationV1,
   type CertifiedSnapshotPublicationV1,
   type DataPopulationCertificationV1,
-  type DatasetScopeBindingV1,
   type DatasetSnapshotV2,
   type MappingApplicationV1,
   type MappingSpecV2
@@ -29,7 +29,7 @@ export interface PublishCertifiedSnapshotRequestV1 {
   readonly publicationId: string;
   readonly certificationManifestId: string;
   readonly datasetSnapshotId: string;
-  readonly datasetBindingId: string;
+  readonly datasetBindingDefinitionVersionId: string;
   readonly sourceContractDefinitionVersionId: string;
   readonly idempotencyKey: string;
 }
@@ -39,6 +39,10 @@ export interface CertifiedSnapshotPublicationEvidenceV1 {
   readonly population: DataPopulationCertificationV1;
   readonly mappingSpec: MappingSpecV2;
   readonly mappingApplication: MappingApplicationV1;
+  readonly normalizedArtifactIdentity?: Readonly<{
+    readonly artifactContractVersion: 2;
+    readonly artifactHash: `sha256:${string}`;
+  }>;
   /** Exact metadata returned by tenant-scoped ArtifactStore.getJson; implementations must not synthesize it. */
   readonly normalizedArtifact: StoredArtifact;
 }
@@ -50,11 +54,11 @@ export interface SurveillanceSourcePublicationAuthorityV1 {
     readonly datasetSnapshotId: string;
     readonly certificationManifestId: string;
   }): Promise<DatasetSnapshotV2 | undefined> | DatasetSnapshotV2 | undefined;
-  /** Durable tenant/dataset/source/scope identity; it is never supplied by the publication caller. */
-  resolveDatasetBinding(input: {
+  /** Resolves activated, lifecycle-frozen dataset/scope identity; its data projection is derived server-side. */
+  resolveFrozenDatasetBinding(input: {
     readonly tenantId: string;
-    readonly datasetBindingId: string;
-  }): Promise<DatasetScopeBindingV1 | undefined> | DatasetScopeBindingV1 | undefined;
+    readonly datasetBindingDefinitionVersionId: string;
+  }): Promise<ResolvedGovernedDefinitionV2 | undefined> | ResolvedGovernedDefinitionV2 | undefined;
   /** Resolves the activated, frozen governed SourceContract v2 definition and lifecycle evidence. */
   resolveFrozenSourceContract(input: {
     readonly tenantId: string;
@@ -110,15 +114,15 @@ export class SurveillanceSourcePublicationService {
     const input = request(inputValue);
     const trustedActor = parseWithSchema(IdentifierSchema, trustedActorValue, "trusted publication actor");
     const requestHash = canonicalHash({ ...input, trustedActor });
-    const [snapshotValue, bindingValue, sourceDefinition, evidenceValue] = await Promise.all([
+    const [snapshotValue, bindingDefinition, sourceDefinition, evidenceValue] = await Promise.all([
       this.#authority.resolveDatasetSnapshotV2({
         tenantId: input.tenantId,
         datasetSnapshotId: input.datasetSnapshotId,
         certificationManifestId: input.certificationManifestId
       }),
-      this.#authority.resolveDatasetBinding({
+      this.#authority.resolveFrozenDatasetBinding({
         tenantId: input.tenantId,
-        datasetBindingId: input.datasetBindingId
+        datasetBindingDefinitionVersionId: input.datasetBindingDefinitionVersionId
       }),
       this.#authority.resolveFrozenSourceContract({
         tenantId: input.tenantId,
@@ -129,14 +133,28 @@ export class SurveillanceSourcePublicationService {
         certificationManifestId: input.certificationManifestId
       })
     ]);
-    if (!snapshotValue || !bindingValue || !sourceDefinition || !evidenceValue) {
+    if (!snapshotValue || !bindingDefinition || !sourceDefinition || !evidenceValue) {
       throw new SurveillanceSourcePublicationError(
         "EVIDENCE_NOT_FOUND",
         "Certified snapshot publication evidence was not found"
       );
     }
     const snapshot = evidence(() => parseDatasetSnapshotV2(snapshotValue));
-    const binding = evidence(() => parseDatasetScopeBindingV1(bindingValue));
+    const governedBinding = evidence(() =>
+      parseGovernedDatasetScopeBindingV1(bindingDefinition.executionDocument)
+    );
+    const bindingBody = {
+      contractVersion: 1 as const,
+      bindingId: governedBinding.bindingId,
+      tenantId: governedBinding.tenantId,
+      datasetId: governedBinding.datasetId,
+      sourceContract: governedBinding.sourceContract,
+      scope: governedBinding.scope,
+      boundAt: bindingDefinition.approvalEvidence.approvedAt
+    };
+    const binding = evidence(() =>
+      parseDatasetScopeBindingV1({ ...bindingBody, bindingHash: canonicalHash(bindingBody) })
+    );
     const sourceContract = evidence(() => parseSourceContractV1(sourceDefinition.executionDocument));
     const certification = evidence(() =>
       parseCertificationManifestPublicationV1(evidenceValue.certification)
@@ -147,6 +165,15 @@ export class SurveillanceSourcePublicationService {
       parseMappingApplicationV1(evidenceValue.mappingApplication)
     );
     const normalizedArtifact = storedArtifact(evidenceValue.normalizedArtifact);
+    const normalizedArtifactIdentity = evidenceValue.normalizedArtifactIdentity;
+    const normalizedArtifactIdentityValid =
+      normalizedArtifactIdentity !== undefined &&
+      normalizedArtifactIdentity !== null &&
+      typeof normalizedArtifactIdentity === "object" &&
+      canonicalJson(Object.keys(normalizedArtifactIdentity).sort()) ===
+        canonicalJson(["artifactContractVersion", "artifactHash"]) &&
+      normalizedArtifactIdentity.artifactContractVersion === 2 &&
+      /^sha256:[a-f0-9]{64}$/u.test(normalizedArtifactIdentity.artifactHash);
     const normalizedArtifactMetadataHash = canonicalHash({
       artifactId: normalizedArtifact.artifactId,
       tenantBinding: normalizedArtifact.tenantBinding,
@@ -164,6 +191,11 @@ export class SurveillanceSourcePublicationService {
       sourceDefinition.reference.definitionKey !== sourceContract.sourceKey ||
       sourceDefinition.reference.semanticVersion !== `${sourceContract.revision}.0.0` ||
       sourceDefinition.reference.approvalEventHash !== sourceDefinition.approvalEvidence.approvalEventHash ||
+      bindingDefinition.reference.kind !== "dataset_scope_binding" ||
+      bindingDefinition.reference.definitionVersionId !== input.datasetBindingDefinitionVersionId ||
+      bindingDefinition.reference.definitionKey !== governedBinding.bindingId ||
+      bindingDefinition.reference.semanticVersion !== `${governedBinding.revision}.0.0` ||
+      bindingDefinition.reference.approvalEventHash !== bindingDefinition.approvalEvidence.approvalEventHash ||
       sourceContract.tenantId !== input.tenantId ||
       snapshot.tenantId !== input.tenantId ||
       binding.tenantId !== input.tenantId ||
@@ -171,7 +203,10 @@ export class SurveillanceSourcePublicationService {
       certification.certificationManifestId !== input.certificationManifestId ||
       snapshot.snapshotId !== input.datasetSnapshotId ||
       certification.snapshotId !== input.datasetSnapshotId ||
-      binding.bindingId !== input.datasetBindingId
+      governedBinding.effectiveFrom > snapshot.asOfDate ||
+      (governedBinding.effectiveTo !== undefined && governedBinding.effectiveTo <= snapshot.asOfDate) ||
+      sourceContract.effectiveFrom > snapshot.asOfDate ||
+      (sourceContract.effectiveTo !== undefined && sourceContract.effectiveTo <= snapshot.asOfDate)
     ) {
       mismatch("Publication authority substituted a tenant, id, kind, or frozen definition");
     }
@@ -193,7 +228,9 @@ export class SurveillanceSourcePublicationService {
     if (
       normalizedArtifact.kind !== "normalized_snapshot" ||
       normalizedArtifact.mediaType !== "application/json" ||
-      controlHash(normalizedArtifact.artifactId) !== certification.normalizedArtifactId ||
+      (normalizedArtifactIdentity !== undefined && !normalizedArtifactIdentityValid) ||
+      (certification.evidenceFormat === "modern_snapshot_v2" && !normalizedArtifactIdentityValid) ||
+      bareHash(normalizedArtifact.artifactId) !== bareHash(certification.normalizedArtifactId) ||
       controlHash(normalizedArtifact.contentHash) !== certification.normalizedArtifactContentHash
     ) {
       mismatch("Normalized artifact metadata does not match certification");
@@ -247,7 +284,13 @@ export class SurveillanceSourcePublicationService {
         },
         mappingApplication,
         normalizedArtifact: {
-          artifactId: controlHash(normalizedArtifact.artifactId),
+          artifactId: certification.normalizedArtifactId,
+          ...(normalizedArtifactIdentityValid
+            ? {
+                artifactContractVersion: normalizedArtifactIdentity.artifactContractVersion,
+                artifactHash: normalizedArtifactIdentity.artifactHash
+              }
+            : {}),
           kind: "normalized_snapshot",
           mediaType: "application/json",
           contentHash: controlHash(normalizedArtifact.contentHash),
@@ -275,7 +318,7 @@ function request(input: PublishCertifiedSnapshotRequestV1): PublishCertifiedSnap
   if (!input || typeof input !== "object" || Array.isArray(input)) invalid("Publication request is invalid");
   const expected = [
     "certificationManifestId",
-    "datasetBindingId",
+    "datasetBindingDefinitionVersionId",
     "datasetSnapshotId",
     "idempotencyKey",
     "publicationId",
@@ -335,6 +378,12 @@ function controlHash(value: string): `sha256:${string}` {
     mismatch("Normalized artifact content hash is invalid");
   }
   return normalized as `sha256:${string}`;
+}
+
+function bareHash(value: string): string {
+  const bare = value.startsWith("sha256:") ? value.slice("sha256:".length) : value;
+  if (!/^[a-f0-9]{64}$/u.test(bare)) mismatch("Normalized artifact identifier is invalid");
+  return bare;
 }
 
 function evidence<T>(operation: () => T): T {

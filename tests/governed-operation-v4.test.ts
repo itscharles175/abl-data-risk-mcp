@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -11,6 +14,7 @@ import {
 } from "../src/contracts/canonical.js";
 import type { MetricDefinitionV1 } from "../src/domain/surveillance/contracts.js";
 import type { ResolvedGovernedDefinitionV2 } from "../src/services/governed-definition-v2-resolver.js";
+import { ArtifactStore, artifactJsonContentHash } from "../src/control/artifacts.js";
 import {
   assertGovernedResultArtifactV4MatchesEnvelope,
   assertGovernedResultManifestV4Creator,
@@ -32,8 +36,10 @@ import {
   type PortfolioSurveillanceAuthorizationPreflightV4
 } from "../src/services/governed-operation-v4.js";
 import {
+  bindPortfolioSurveillanceGovernanceV1,
   createCertifiedSnapshotMaterialV1,
   executePortfolioSurveillanceOperationV1,
+  parsePortfolioSurveillanceExecutionPlanV1,
   preparePortfolioSurveillanceExecutionPlanV1,
   type CertifiedSnapshotMaterialV1,
   type PortfolioSurveillanceExecutionPlanV1,
@@ -52,6 +58,36 @@ const REQUESTED_FIELDS = [
   "outstanding_balance",
   "source_system"
 ] as const;
+
+const SOURCE_ACCESS_POLICIES = [{
+  definitionVersionId: "source-policy-v1",
+  definitionKey: "portfolio-risk-read",
+  semanticVersion: "1.0.0",
+  versionHash: hash("source-policy-version"),
+  documentHash: hash("source-policy-document"),
+  approvalEventHash: hash("source-policy-approval"),
+  executionDocumentHash: hash("source-policy-execution"),
+  policyId: "portfolio-risk-read",
+  revision: 1,
+  policyHash: hash("source-policy"),
+  effectiveFrom: "2026-01-01",
+  effectiveTo: null
+}] as const;
+
+const DATASET_SCOPE_BINDINGS = [{
+  definitionVersionId: "dataset-binding-v1",
+  definitionKey: "loan-tape-binding",
+  semanticVersion: "1.0.0",
+  versionHash: hash("dataset-binding-version"),
+  documentHash: hash("dataset-binding-document"),
+  approvalEventHash: hash("dataset-binding-approval"),
+  executionDocumentHash: hash("dataset-binding-execution"),
+  bindingId: "loan-tape-binding",
+  revision: 1,
+  bindingHash: hash("dataset-binding"),
+  effectiveFrom: "2026-01-01",
+  effectiveTo: null
+}] as const;
 
 let PLAN: PortfolioSurveillanceExecutionPlanV1;
 
@@ -74,6 +110,62 @@ testWithPlan("v4 preflight and envelope round-trip with exact authority, descrip
   assert.equal(envelope.definitionSetHash, preflight.definitionSetHash);
   assert.equal(envelope.parameterFingerprint, bare(envelope.planHash));
   assert.deepEqual(envelope.descriptor, portfolioSurveillanceDescriptorBindingV4());
+});
+
+testWithPlan("legacy standalone plans remain parseable but v4 requires exact governance references", () => {
+  const legacy = mutable(PLAN);
+  delete legacy.governanceBindings;
+  rehash(legacy, "planHash");
+  const parsedLegacy = parsePortfolioSurveillanceExecutionPlanV1(legacy);
+  assert.equal(parsedLegacy.governanceBindings, undefined);
+
+  const preflight = preflightFixture();
+  const legacyEnvelope = createGovernedExecutionEnvelopeV4({
+    ...envelopeInput(preflight),
+    planArtifact: {
+      ...envelopeInput(preflight).planArtifact,
+      contentHash: artifactJsonContentHash(parsedLegacy),
+      byteLength: Buffer.byteLength(canonicalJson(parsedLegacy), "utf8")
+    },
+    planHash: parsedLegacy.planHash,
+    parameterFingerprint: bare(parsedLegacy.planHash)
+  });
+  assert.throws(
+    () => finalizeGovernedResultArtifactV4(
+      resultSeed(executePortfolioSurveillanceOperationV1(parsedLegacy)),
+      legacyEnvelope,
+      parsedLegacy,
+      executionAuthorizationFixture(legacyEnvelope)
+    ),
+    ContractValidationError
+  );
+
+  const substituted = mutable(PLAN);
+  const governance = nested(substituted, "governanceBindings");
+  const policies = governance.sourceAccessPolicies as Array<Record<string, unknown>>;
+  policies[0]!.policyHash = canonicalHash("substituted-source-policy");
+  governance.sourceAccessPolicySetHash = canonicalHash(policies);
+  rehash(substituted, "planHash");
+  const parsedSubstituted = parsePortfolioSurveillanceExecutionPlanV1(substituted);
+  const substitutedEnvelope = createGovernedExecutionEnvelopeV4({
+    ...envelopeInput(preflight),
+    planArtifact: {
+      ...envelopeInput(preflight).planArtifact,
+      contentHash: artifactJsonContentHash(parsedSubstituted),
+      byteLength: Buffer.byteLength(canonicalJson(parsedSubstituted), "utf8")
+    },
+    planHash: parsedSubstituted.planHash,
+    parameterFingerprint: bare(parsedSubstituted.planHash)
+  });
+  assert.throws(
+    () => finalizeGovernedResultArtifactV4(
+      resultSeed(executePortfolioSurveillanceOperationV1(parsedSubstituted)),
+      substitutedEnvelope,
+      parsedSubstituted,
+      executionAuthorizationFixture(substitutedEnvelope)
+    ),
+    ContractValidationError
+  );
 });
 
 testWithPlan("preflight rejects schema drift, noncanonical time, unsorted fields, and requested-field hash drift", () => {
@@ -158,6 +250,17 @@ testWithPlan("envelope rejects cross-tenant, cutoff, set-order, duplicate, and e
         planArtifact: {
           ...base.planArtifact,
           byteLength: 10_000_001
+        }
+      }),
+    ContractValidationError
+  );
+  assert.throws(
+    () =>
+      createGovernedExecutionEnvelopeV4({
+        ...base,
+        planArtifact: {
+          ...base.planArtifact,
+          kind: "normalized_snapshot"
         }
       }),
     ContractValidationError
@@ -462,6 +565,48 @@ testWithPlan("v4 manifest self-binds accounting and plan lineage and exactly bin
   assert.equal(manifest.lineage.planHash, envelope.planHash);
 });
 
+testWithPlan("stored result binding uses exact ArtifactStore bytes for dynamic object keys", () => {
+  const root = mkdtempSync(join(tmpdir(), "abl-v4-result-artifact-"));
+  try {
+    const result = mutable(resultFixture());
+    const authorization = nested(result, "authorization");
+    const obligations = nested(authorization, "obligations");
+    obligations.fieldMasks = { a: "redact", A: "redact" };
+    const parsedResult = parseGovernedResultArtifactV4Structure(result);
+    const artifacts = new ArtifactStore(root, {
+      activeKeyId: "test-key",
+      keys: { "test-key": Buffer.alloc(32, 7) }
+    });
+    const stored = artifacts.putJson({
+      tenantId: TENANT,
+      kind: "governed_analysis_result_v4",
+      mediaType: "application/json",
+      value: parsedResult
+    });
+    assert.equal(stored.contentHash, artifactJsonContentHash(parsedResult));
+    assert.notEqual(stored.contentHash, bare(canonicalHash(parsedResult)));
+
+    const manifest = finalizeGovernedResultManifestV4(
+      manifestInput(),
+      parsedResult,
+      {
+        artifactId: stored.artifactId,
+        kind: "governed_analysis_result_v4",
+        mediaType: "application/json",
+        contentHash: stored.contentHash,
+        byteLength: stored.byteLength
+      }
+    );
+    const recovered = artifacts.getJson(TENANT, stored.artifactId);
+    assert.deepEqual(recovered.value, parsedResult);
+    assert.doesNotThrow(() =>
+      assertGovernedResultManifestV4MatchesResult(manifest, recovered.value)
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 testWithPlan("manifest rejects identifier, accounting, and plan-artifact tampering; cross-check rejects rehashed substitution", () => {
   const result = resultFixture();
   const manifest = manifestFixture(result);
@@ -490,6 +635,18 @@ testWithPlan("manifest rejects identifier, accounting, and plan-artifact tamperi
         manifestInput(),
         result,
         { ...storedResultArtifactFixture(result), byteLength: 10_000_001 }
+      ),
+    ContractValidationError
+  );
+  assert.throws(
+    () =>
+      finalizeGovernedResultManifestV4(
+        manifestInput(),
+        result,
+        {
+          ...storedResultArtifactFixture(result),
+          mediaType: "application/octet-stream"
+        }
       ),
     ContractValidationError
   );
@@ -567,21 +724,8 @@ function preflightInput() {
       planningCutoff: "2026-08-12T12:00:00.000Z",
       terminalCertificationIds: ["cert-feb", "cert-jan"]
     }),
-    sourceAccessPolicySetHash: canonicalHash(
-      PLAN.sourceLineage.map(
-        ({
-          certificationManifestId,
-          authorizedPurpose,
-          authorizedFieldsHash,
-          authorizedAggregateDimensionFieldsHash
-        }) => ({
-          certificationManifestId,
-          authorizedPurpose,
-          authorizedFieldsHash,
-          authorizedAggregateDimensionFieldsHash
-        })
-      )
-    ),
+    sourceAccessPolicySetHash: canonicalHash(SOURCE_ACCESS_POLICIES),
+    datasetScopeBindingSetHash: canonicalHash(DATASET_SCOPE_BINDINGS),
     definitionSetHash: PLAN.definitionSetHash,
     requestedFields: PLAN.requestedFields,
     requestedFieldsHash: PLAN.requestedFieldsHash,
@@ -626,7 +770,9 @@ function envelopeInput(
     preflight,
     planArtifact: {
       artifactId: bare(canonicalHash("plan-artifact-id")),
-      contentHash: bare(canonicalHash(PLAN)),
+      kind: "governed_portfolio_surveillance_plan_v4" as const,
+      mediaType: "application/json" as const,
+      contentHash: artifactJsonContentHash(PLAN),
       byteLength: Buffer.byteLength(canonicalPlan, "utf8")
     },
     requestHash: preflight.requestHash,
@@ -634,6 +780,7 @@ function envelopeInput(
     sourceSelectionHash: preflight.sourceSelectionHash,
     sourceIdentityHash: preflight.sourceIdentityHash,
     sourceAccessPolicySetHash: preflight.sourceAccessPolicySetHash,
+    datasetScopeBindingSetHash: preflight.datasetScopeBindingSetHash,
     sourceSetHash: PLAN.sourceSetHash,
     definitionSetHash: preflight.definitionSetHash,
     requestedFields: preflight.requestedFields,
@@ -707,7 +854,9 @@ function manifestInput() {
 function storedResultArtifactFixture(result: GovernedResultArtifactV4) {
   return {
     artifactId: bare(canonicalHash("result-artifact-id")),
-    contentHash: bare(canonicalHash(result)),
+    kind: "governed_analysis_result_v4" as const,
+    mediaType: "application/json" as const,
+    contentHash: artifactJsonContentHash(result),
     byteLength: Buffer.byteLength(canonicalJson(result), "utf8")
   };
 }
@@ -837,7 +986,7 @@ async function planFixture(): Promise<PortfolioSurveillanceExecutionPlanV1> {
     certifiedMaterial("cert-jan", "snapshot-jan", "2026-01-31", "100"),
     certifiedMaterial("cert-feb", "snapshot-feb", "2026-02-28", "120")
   ]);
-  return preparePortfolioSurveillanceExecutionPlanV1(
+  const legacy = await preparePortfolioSurveillanceExecutionPlanV1(
     {
       contractVersion: 1,
       operation: "portfolio_surveillance_v1",
@@ -850,6 +999,44 @@ async function planFixture(): Promise<PortfolioSurveillanceExecutionPlanV1> {
     { tenantId: TENANT, purpose: PURPOSE },
     authority
   );
+  const firstSource = legacy.sourceLineage[0]!;
+  const sourceIdentityHash = canonicalHash(
+    legacy.sourceLineage.map(({ datasetId, source, scope }) => ({ datasetId, source, scope }))
+  );
+  const sourceSelectionHash = canonicalHash({
+    planningCutoff: "2026-08-12T12:00:00.000Z",
+    terminalCertificationIds: ["cert-feb", "cert-jan"]
+  });
+  const preflight = createPortfolioSurveillanceAuthorizationPreflightV4({
+    contractVersion: 1,
+    operation: "portfolio_surveillance_v1",
+    tenantId: TENANT,
+    purpose: PURPOSE,
+    descriptor: portfolioSurveillanceDescriptorBindingV4(),
+    requestHash: legacy.requestHash,
+    datasetId: firstSource.datasetId,
+    scopeHash: canonicalHash(firstSource.scope),
+    sourceIdentityHash,
+    sourceSelectionHash,
+    sourceAccessPolicySetHash: canonicalHash(SOURCE_ACCESS_POLICIES),
+    datasetScopeBindingSetHash: canonicalHash(DATASET_SCOPE_BINDINGS),
+    definitionSetHash: legacy.definitionSetHash,
+    requestedFields: legacy.requestedFields,
+    requestedFieldsHash: legacy.requestedFieldsHash,
+    planningCutoff: "2026-08-12T12:00:00.000Z",
+    maximumPlannedCells: 1_000,
+    minimumMetricCellCount: 1
+  });
+  return bindPortfolioSurveillanceGovernanceV1(legacy, {
+    metadataHash: canonicalHash("complete-metadata-preflight"),
+    preflightHash: preflight.preflightHash,
+    sourceSelectionHash,
+    sourceIdentityHash,
+    sourceAccessPolicies: [...SOURCE_ACCESS_POLICIES],
+    sourceAccessPolicySetHash: canonicalHash(SOURCE_ACCESS_POLICIES),
+    datasetScopeBindings: [...DATASET_SCOPE_BINDINGS],
+    datasetScopeBindingSetHash: canonicalHash(DATASET_SCOPE_BINDINGS)
+  });
 }
 
 function certifiedMaterial(

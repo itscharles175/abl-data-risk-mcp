@@ -15,6 +15,7 @@ import {
   type CanonicalJsonValue,
   type Sha256Hash
 } from "../contracts/canonical.js";
+import { artifactJsonContentHash } from "../control/artifacts.js";
 import { PORTFOLIO_SURVEILLANCE_V1_DESCRIPTOR } from "./operations/portfolio-surveillance-v1.js";
 import {
   accountPortfolioSurveillanceOperationResultV1,
@@ -181,6 +182,8 @@ const DescriptorBindingSchema = z
 const PlanArtifactReferenceSchema = z
   .object({
     artifactId: BareHashSchema,
+    kind: z.literal("governed_portfolio_surveillance_plan_v4"),
+    mediaType: z.literal("application/json"),
     contentHash: BareHashSchema,
     byteLength: z.number().int().positive().max(MAXIMUM_PLAN_ARTIFACT_BYTES)
   })
@@ -203,6 +206,7 @@ const PortfolioSurveillanceAuthorizationPreflightV4BodySchema = z
     sourceIdentityHash: Sha256HashSchema,
     sourceSelectionHash: Sha256HashSchema,
     sourceAccessPolicySetHash: Sha256HashSchema,
+    datasetScopeBindingSetHash: Sha256HashSchema,
     definitionSetHash: Sha256HashSchema,
     requestedFields: sortedUniqueStrings(IdentifierSchema, 1, 2_000, "requested fields"),
     requestedFieldsHash: Sha256HashSchema,
@@ -269,6 +273,7 @@ const GovernedExecutionEnvelopeV4BodySchema = z
     sourceSelectionHash: Sha256HashSchema,
     sourceIdentityHash: Sha256HashSchema,
     sourceAccessPolicySetHash: Sha256HashSchema,
+    datasetScopeBindingSetHash: Sha256HashSchema,
     sourceSetHash: Sha256HashSchema,
     definitionSetHash: Sha256HashSchema,
     requestedFields: sortedUniqueStrings(IdentifierSchema, 1, 2_000, "requested fields"),
@@ -391,6 +396,7 @@ const ResultLineageSchema = z
     sourceIdentityHash: Sha256HashSchema,
     sourceSelectionHash: Sha256HashSchema,
     sourceAccessPolicySetHash: Sha256HashSchema,
+    datasetScopeBindingSetHash: Sha256HashSchema,
     sourceSetHash: Sha256HashSchema,
     definitionSetHash: Sha256HashSchema,
     requestedFieldsHash: Sha256HashSchema,
@@ -536,6 +542,7 @@ export function governedV4LineageFromEnvelope(
     sourceIdentityHash: envelope.sourceIdentityHash,
     sourceSelectionHash: envelope.sourceSelectionHash,
     sourceAccessPolicySetHash: envelope.sourceAccessPolicySetHash,
+    datasetScopeBindingSetHash: envelope.datasetScopeBindingSetHash,
     sourceSetHash: envelope.sourceSetHash,
     definitionSetHash: envelope.definitionSetHash,
     requestedFieldsHash: envelope.requestedFieldsHash,
@@ -576,6 +583,8 @@ export function assertGovernedResultArtifactV4MatchesEnvelope(
 const StoredResultArtifactReferenceSchema = z
   .object({
     artifactId: BareHashSchema,
+    kind: z.literal("governed_analysis_result_v4"),
+    mediaType: z.literal("application/json"),
     contentHash: BareHashSchema,
     byteLength: z.number().int().positive().max(MAXIMUM_PLAN_ARTIFACT_BYTES)
   })
@@ -793,6 +802,7 @@ function assertEnvelopeBindings(
     preflight.sourceSelectionHash !== envelope.sourceSelectionHash ||
     preflight.sourceIdentityHash !== envelope.sourceIdentityHash ||
     preflight.sourceAccessPolicySetHash !== envelope.sourceAccessPolicySetHash ||
+    preflight.datasetScopeBindingSetHash !== envelope.datasetScopeBindingSetHash ||
     preflight.definitionSetHash !== envelope.definitionSetHash ||
     canonicalJson(preflight.requestedFields) !== canonicalJson(envelope.requestedFields) ||
     preflight.requestedFieldsHash !== envelope.requestedFieldsHash ||
@@ -846,21 +856,10 @@ function parseAndBindPlan(
   const sourceIdentityHash = canonicalHash(
     plan.sourceLineage.map(({ datasetId, source, scope }) => ({ datasetId, source, scope }))
   );
-  const sourceAccessPolicySetHash = canonicalHash(
-    plan.sourceLineage.map(
-      ({
-        certificationManifestId,
-        authorizedPurpose,
-        authorizedFieldsHash,
-        authorizedAggregateDimensionFieldsHash
-      }) => ({
-        certificationManifestId,
-        authorizedPurpose,
-        authorizedFieldsHash,
-        authorizedAggregateDimensionFieldsHash
-      })
-    )
-  );
+  const governanceBindings = plan.governanceBindings;
+  if (governanceBindings === undefined) {
+    invariant("GovernedExecutionEnvelopeV4 requires authority-bound plan governance");
+  }
   const maximumPlannedCells = plan.engineInput.metricDefinitions.reduce(
     (sum, metric) => sum + metric.maximumCells,
     0
@@ -876,11 +875,20 @@ function parseAndBindPlan(
     plan.planHash !== envelope.planHash ||
     plan.sourceSetHash !== envelope.sourceSetHash ||
     sourceIdentityHash !== envelope.sourceIdentityHash ||
-    sourceAccessPolicySetHash !== envelope.sourceAccessPolicySetHash ||
+    governanceBindings.preflightHash !== envelope.preflight.preflightHash ||
+    governanceBindings.sourceSelectionHash !== envelope.sourceSelectionHash ||
+    governanceBindings.sourceIdentityHash !== envelope.sourceIdentityHash ||
+    canonicalHash(governanceBindings.sourceAccessPolicies) !==
+      envelope.sourceAccessPolicySetHash ||
+    governanceBindings.sourceAccessPolicySetHash !== envelope.sourceAccessPolicySetHash ||
+    canonicalHash(governanceBindings.datasetScopeBindings) !==
+      envelope.datasetScopeBindingSetHash ||
+    governanceBindings.datasetScopeBindingSetHash !==
+      envelope.datasetScopeBindingSetHash ||
     plan.definitionSetHash !== envelope.definitionSetHash ||
     plan.requestedFieldsHash !== envelope.requestedFieldsHash ||
     canonicalJson(plan.requestedFields) !== canonicalJson(envelope.requestedFields) ||
-    envelope.planArtifact.contentHash !== bareHash(canonicalHash(plan)) ||
+    envelope.planArtifact.contentHash !== artifactJsonContentHash(plan) ||
     envelope.planArtifact.byteLength !== Buffer.byteLength(canonicalPlan, "utf8") ||
     !sourceDatasetAndScopeMatch ||
     maximumPlannedCells > envelope.preflight.maximumPlannedCells ||
@@ -980,7 +988,7 @@ function assertStoredResultArtifact(
   reference: GovernedStoredResultArtifactReferenceV4
 ): void {
   if (
-    reference.contentHash !== bareHash(canonicalHash(result)) ||
+    reference.contentHash !== artifactJsonContentHash(result) ||
     reference.byteLength !== Buffer.byteLength(canonicalJson(result), "utf8")
   ) {
     invariant("GovernedResultManifestV4 stored artifact evidence did not match result bytes");

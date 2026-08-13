@@ -1,15 +1,15 @@
 # Portfolio Risk Platform Upgrade Checkpoint
 
-Status date: 2026-08-12
+Status date: 2026-08-13
 
-This is the handoff point for the next implementation session. It records what is safely present in the repository, what has been verified, and which gaps must be closed before any production-readiness claim. The current upgrade goal remains active.
+This is the handoff point for the next implementation session. It records what is safely present in the repository, what has been verified, and which gaps must be closed before any production-readiness claim.
 
 ## Start here next session
 
 1. Re-run `git status --short --branch`, `pnpm run check`, and `pnpm run test` before editing.
 2. Read this document and `docs/UPGRADE_IMPLEMENTATION.md` together.
 3. Use GitNexus impact/context before changing existing workflow, definition-store, operator, or remote-runtime symbols.
-4. The sidecar and definition/longitudinal/metric-evidence slices are closed. This checkpoint additionally contains the data-only certified-snapshot publication gate, `source_access_policy` governance, standalone v4 artifact primitives, and a disabled-by-default remote seam; begin with authoritative persistence, policy preflight, and materialization before runtime enablement.
+4. The sidecar, definition/longitudinal/metric-evidence, publication-reader, metadata-preflight, post-policy-materialization, and dedicated v4 durability slices are closed at the local/conformance boundary. This checkpoint additionally contains governed dataset/scope bindings, durable local snapshot-v2/certification-evidence persistence, exact publication-index adapters, standalone v4 artifact primitives, and a fenced two-phase v4 lifecycle with crash-window recovery tests. Begin the next production slice with trusted modern capture and certification writers; do not enable the remote seam.
 5. Wire one vertical production slice at a time, with focused tests and a full verification run after each slice.
 6. Keep `.github/workflows` absent. All checks remain operator-run.
 
@@ -24,12 +24,14 @@ The repository contains additive, strict TypeScript implementations and tests fo
 - governed investigation persistence, masking, bounded cursors, disclosure evidence, adaptive-query controls, and an additive MCP analyst-tool registry;
 - pipeline state, monitoring-v2, governed notification contracts, hybrid connector plans, XLSX/Parquet/object-storage preflight adapters, PostgreSQL certification harnesses, shared PostgreSQL coordination primitives, immutable encrypted object artifacts, and privacy-safe telemetry;
 - operator-run integration, security, and release orchestration with explicit opt-in external gates;
-- an additive governed-definition v2 component and frozen resolver, correction-aware longitudinal certification bundles, governed metric projections, and maker/checker metric-run evidence derived only from signed result-cell authority.
-- `SourceAccessPolicyV1`; data-lineage-only `CertifiedSnapshotPublicationV1`; an IDs-only trusted publication service; an immutable tenant catalog with disable-only events, actor-scoped idempotency, schema attestation, and hash-chained audit; and standalone v4 preflight/envelope/result/manifest finalizers with deterministic accounting and exact stored-result byte binding.
+- an additive governed-definition v2 component and frozen resolver, including maker/checker/effective-dated `dataset_scope_binding` governance; correction-aware longitudinal certification bundles; governed metric projections; and maker/checker metric-run evidence derived only from signed result-cell authority;
+- canonical `NormalizedSnapshotArtifactV2` and `CertifiedSnapshotEvidenceRecordV1` contracts plus immutable, tenant-scoped SQLite `DatasetSnapshotV2` and certification-evidence repositories with schema attestation, idempotency receipts, correction-chain controls, indexed-lineage verification, and reopen/tamper coverage;
+- `SourceAccessPolicyV1`; data-lineage-only `CertifiedSnapshotPublicationV1`; an IDs-only trusted publication service and repository-backed tenant/artifact/evidence verifier; an immutable tenant catalog with disable-only events, exact scope indexes, actor-scoped idempotency, schema attestation, and hash-chained audit; metadata-only preflight that derives fields, resolves terminal corrections and current governed source/scope/policy authority, and obtains a runtime-issued aggregate-only permit without reading artifact bytes;
+- a post-policy materializer that rechecks publication-disable and lineage state before its first tenant-scoped artifact read, verifies and projects only server-derived fields, and persists an exact encrypted governance-bound plan; standalone v4 preflight/envelope/result/manifest finalizers with deterministic accounting and exact ArtifactStore-byte binding; and an additive pointer-only v4 state component, bounded worker entry, and dedicated durable workflow with exact audit pointers, stranded-submission repair, later-lease result/manifest adoption, cancellation fencing, queue-success/audit reconciliation, and frozen execution provenance.
 
 These modules compile and have deterministic/conformance coverage. Presence in the repository does not mean every module is composed into the current production runtime.
 
-The checkpoint intentionally has no production `DatasetSnapshotV2` or certification-evidence repository/authority adapter, governed durable dataset/scope-binding lifecycle, deterministic effective source-policy selector, metadata-only authorization preflight, post-policy artifact materializer, or durable v4 worker/recovery composition. Production `remote-cli` omits the optional portfolio-surveillance workflow, so it continues to advertise and execute only the four legacy governed operations.
+Production enablement remains intentionally absent. No trusted production path currently creates `DatasetSnapshotV2`, `MappingApplicationV1`, `NormalizedSnapshotArtifactV2`, and `CertifiedSnapshotEvidenceRecordV1` from one independently governed execution chain. The missing prerequisites are an active mapping-execution projection, an artifact-backed historical runtime/dictionary-bundle authority, trusted modern SQL capture/certification writers, operator composition, and a composite opaque-handle router for the fifth operation. Production `remote-cli` omits the optional portfolio-surveillance workflow and continues to advertise and execute only the four legacy governed operations.
 
 ## Completed slice: certified sidecar enforcement
 
@@ -57,9 +59,9 @@ Continue with these vertical slices in order:
 
 The append-only `withdrawn` terminal state and trusted `definition-v2-*` operator/runtime bridge are complete. The bridge accepts no request-supplied actor, keeps maker/checker and effectivity enforcement store-side, verifies effective selections through the durable resolver, and returns metadata rather than documents or transition evidence. It remains intentionally absent from MCP and the remote runtime.
 
-1. Add durable snapshot-v2 and certification-evidence repositories, a governed dataset/scope-binding lifecycle, a repository-backed publication authority, and unique effective source-policy resolution. Legacy evidence must fail closed rather than be projected into modern lineage by assertion.
-2. Compose metadata-only authorization preflight followed by a post-policy materializer. Recheck policy and publication-disable state before the first artifact read, project only server-derived fields, and bind the exact source-policy set into the encrypted immutable plan.
-3. Register `portfolio_surveillance_v1` in the durable v4 workflow/worker/recovery path with legacy v2/v3 compatibility; only then inject the dedicated remote workflow. Add ABL-v2 later as a separate certified-input operation.
+1. Add trusted relation/source binding, active mapping-execution, and immutable runtime/dictionary-bundle authorities. Add a modern SQL capture service that derives `DatasetSnapshotV2` from an exact extraction receipt; do not mutate or infer missing evidence from the legacy ingestion records.
+2. Add an IDs-only modern certification writer that re-resolves those authorities, executes mapping-v2, evaluates DQ/reconciliation on the exact output population, persists `NormalizedSnapshotArtifactV2`, reloads exact ArtifactStore metadata, and writes `CertifiedSnapshotEvidenceRecordV1` last. Expose additive `extract-sql-v2` and `certify-snapshot-v2` operator commands with server-derived actors and hashes.
+3. Compose the completed publication verifier, metadata-only preflight, post-policy materializer, and dedicated v4 lifecycle in an environment-backed operator/worker deployment. Implement composite opaque-handle routing for start/status/result/cancel, then and only then inject the fifth remote workflow. Add ABL-v2 later as a separate certified-input operation.
 4. Implement the production `MetricRunAuthorityResolver` over signed surveillance result artifacts/manifests and expose only the IDs-only `MetricRunEvidenceService` creation/approval path. Bind monitoring-v2 observations to exact certified metric-run IDs; never expose the internal metric-run store as an authority.
 5. Construct the investigation/report workflow in `remote-cli`, then enable the additive analyst MCP tools with real policy, audit, artifact, and lifecycle dependencies. The tool registry alone is not a production capability.
 6. Replace the BFF fixture adapter with a tenant-aware authenticated control API; add durable sessions, tenant-scoped approval records, audit receipts, and browser E2E against that API.
@@ -80,14 +82,14 @@ The external-sidecar bridge intentionally does not infer facility-specific entit
 
 ## Verification commands
 
-Latest evidence captured on 2026-08-12:
+Latest evidence captured on 2026-08-13:
 
-- `pnpm run verify`: passed; 435 root tests passed, one opt-in live PostgreSQL test skipped, and all 21 platform tests passed; both strict TypeScript configurations and production builds passed;
+- `pnpm run verify`: passed; 489 root tests passed, one opt-in live PostgreSQL test skipped, and all 21 platform tests passed; both strict TypeScript configurations and production builds passed;
 - `pnpm run verify:integration`: passed local conformance; 68 tests passed, one live PostgreSQL test skipped, and all 21 platform tests passed; external services were not run;
 - `pnpm run verify:security`: passed local adversarial checks; 127 tests passed and one opt-in test skipped; external tenant/RLS/egress/WORM gates were not run;
 - `pnpm run audit:prod`: no known production dependency vulnerabilities;
-- the current definition/resolver/publication/v4/job/remote checkpoint suite passed 56/56, and independent read-only adversarial reviews found no remaining blocker. The reviews covered tenant substitution, lifecycle actor forgery, publication authority substitution, remote capability construction, raw-result smuggling, policy-obligation relaxation, execution TTL/identity/runtime bounds, exact stored-result byte binding, cancellation races, and v4 lineage/accounting substitution;
-- the final GitNexus PDG rebuild contains 34,596 nodes, 79,948 edges, and 238 modeled flows. Staged impact detection classified this 21-file, 331-symbol checkpoint `high` across 12 modeled flows, as expected for the governed-definition schema migration, job completion fencing, and conditional remote dispatch/capability seam; the full, focused, integration, security, schema-adversarial, and independent review gates above cover that blast radius;
+- the focused v4 state/workflow checkpoint suite passed 20/20. Its injected crash windows cover durable submission-before-audit repair, result-only and manifest-persisted later-lease adoption without recomputation, original signed-plan/code-version provenance, cancellation after completion preparation, queue-success audit/state repair before disclosure, and authorization-before-artifact-read ordering;
+- the current GitNexus index contains 7,162 symbols, 20,180 relationships, and 253 modeled execution flows. Staged impact detection classified this 39-file, 865-symbol checkpoint `critical` across 81 affected processes, as expected for the governed-definition schema migration plus the new durable v4 workflow, state, publication, preflight, and materialization foundations; the production remote path remains disabled, and the full, focused, integration, security, migration, schema-adversarial, and independent review gates above cover the local blast radius;
 - console fixture browser QA covered sign-in, role-filtered navigation, source profiling, responsive layout, and a clean browser console;
 - `.github/workflows` contains no tracked workflow files.
 

@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   IdentifierSchema,
+  IsoDateSchema,
   IsoTimestampSchema,
   Sha256HashSchema,
   canonicalHash,
@@ -19,7 +20,32 @@ import { migrateSqliteComponent } from "../infrastructure/sqlite-component-schem
 
 export const SURVEILLANCE_PUBLICATION_CATALOG_COMPONENT =
   "abl.surveillance-publication-catalog" as const;
-export const SURVEILLANCE_PUBLICATION_CATALOG_SCHEMA_VERSION = 1 as const;
+export const SURVEILLANCE_PUBLICATION_CATALOG_SCHEMA_VERSION = 2 as const;
+const MAXIMUM_CATALOG_INTEGRITY_ROWS = 1_000_000;
+
+export interface SurveillancePublicationScopeQueryV1 {
+  readonly tenantId: string;
+  readonly datasetId: string;
+  readonly sourceContract: Readonly<{
+    sourceContractId: string;
+    sourceKey: string;
+    revision: number;
+    sourceContractHash: Sha256Hash;
+  }>;
+  readonly scope: Readonly<{
+    scopeType: "portfolio" | "facility";
+    scopeId: string;
+  }>;
+  readonly asOfDate: string;
+  readonly publishedThrough: string;
+  readonly maximumResults: number;
+}
+
+export interface CompleteSurveillancePublicationScopePageV1 {
+  readonly publications: readonly CertifiedSnapshotPublicationV1[];
+  /** False means at least one matching row exists beyond the returned bound. */
+  readonly complete: boolean;
+}
 
 export interface RecordSurveillancePublicationInput {
   readonly publication: CertifiedSnapshotPublicationV1;
@@ -107,13 +133,17 @@ export class SurveillancePublicationCatalog {
       migrateSqliteComponent(this.#database, {
         componentName: SURVEILLANCE_PUBLICATION_CATALOG_COMPONENT,
         supportedVersion: SURVEILLANCE_PUBLICATION_CATALOG_SCHEMA_VERSION,
-        migrations: [{ version: 1, sql: SURVEILLANCE_PUBLICATION_CATALOG_SCHEMA }],
+        migrations: [
+          { version: 1, sql: SURVEILLANCE_PUBLICATION_CATALOG_SCHEMA_V1 },
+          { version: 2, sql: SURVEILLANCE_PUBLICATION_CATALOG_MIGRATION_V2 }
+        ],
         unsupportedVersionError: (current, supported) =>
           new SurveillancePublicationCatalogError(
             "CONFLICT",
             `Surveillance publication schema ${current} is newer than supported version ${supported}`
           )
       });
+      this.#assertScopeIndexIntegrity();
     } catch (error) {
       this.#database.close();
       throw error;
@@ -304,6 +334,68 @@ export class SurveillancePublicationCatalog {
     return rows.map(publicationFromRow);
   }
 
+  /**
+   * Returns every publication matching one exact lineage selector when the
+   * result fits within the caller's bound. The extra row is a completeness
+   * witness; callers must reject a page whose `complete` flag is false.
+   */
+  listByScopeAsOf(
+    queryValue: SurveillancePublicationScopeQueryV1
+  ): CompleteSurveillancePublicationScopePageV1 {
+    this.#assertOpen();
+    const query = validateScopeQuery(queryValue);
+    // Re-prove coverage on every lineage read so out-of-band tampering after
+    // startup cannot turn a moved or deleted index row into complete:true.
+    this.#assertScopeIndexIntegrity();
+    const rows = this.#database
+      .prepare(
+        `SELECT publication.*,
+                scope_index.dataset_id AS indexed_dataset_id,
+                scope_index.source_contract_id AS indexed_source_contract_id,
+                scope_index.source_contract_key AS indexed_source_contract_key,
+                scope_index.source_contract_revision AS indexed_source_contract_revision,
+                scope_index.source_contract_hash AS indexed_source_contract_hash,
+                scope_index.scope_type AS indexed_scope_type,
+                scope_index.scope_id AS indexed_scope_id,
+                scope_index.as_of_date AS indexed_as_of_date,
+                scope_index.published_at AS indexed_published_at,
+                scope_index.publication_hash AS indexed_publication_hash
+           FROM surveillance_publication_scope_index AS scope_index
+           JOIN surveillance_publications AS publication
+             ON publication.tenant_id = scope_index.tenant_id
+            AND publication.publication_id = scope_index.publication_id
+            AND publication.publication_hash = scope_index.publication_hash
+          WHERE scope_index.tenant_id = ?
+            AND scope_index.dataset_id = ?
+            AND scope_index.source_contract_id = ?
+            AND scope_index.source_contract_key = ?
+            AND scope_index.source_contract_revision = ?
+            AND scope_index.source_contract_hash = ?
+            AND scope_index.scope_type = ?
+            AND scope_index.scope_id = ?
+            AND scope_index.as_of_date = ?
+            AND scope_index.published_at <= ?
+          ORDER BY scope_index.published_at, scope_index.publication_id
+          LIMIT ?`
+      )
+      .all(
+        query.tenantId,
+        query.datasetId,
+        query.sourceContract.sourceContractId,
+        query.sourceContract.sourceKey,
+        query.sourceContract.revision,
+        query.sourceContract.sourceContractHash,
+        query.scope.scopeType,
+        query.scope.scopeId,
+        query.asOfDate,
+        query.publishedThrough,
+        query.maximumResults + 1
+      ) as unknown as PublicationScopeIndexRow[];
+    const complete = rows.length <= query.maximumResults;
+    const publications = rows.slice(0, query.maximumResults).map(publicationFromScopeIndexRow);
+    return Object.freeze({ publications: Object.freeze(publications), complete });
+  }
+
   listAuditEvents(
     tenantIdValue: string,
     afterTenantSequence = 0,
@@ -468,9 +560,70 @@ export class SurveillancePublicationCatalog {
       throw new SurveillancePublicationCatalogError("STORE_CLOSED", "Publication catalog is closed");
     }
   }
+
+  /**
+   * Proves global one-to-one coverage and every derived projection with
+   * constant-size query results. The hard row ceiling bounds work and fails
+   * closed rather than letting an oversized or damaged catalog authorize.
+   */
+  #assertScopeIndexIntegrity(): void {
+    const counts = this.#database
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM surveillance_publications) AS publication_count,
+           (SELECT COUNT(*) FROM surveillance_publication_scope_index) AS index_count`
+      )
+      .get() as { readonly publication_count: number; readonly index_count: number };
+    if (
+      !Number.isSafeInteger(counts.publication_count) ||
+      !Number.isSafeInteger(counts.index_count) ||
+      counts.publication_count !== counts.index_count ||
+      counts.publication_count > MAXIMUM_CATALOG_INTEGRITY_ROWS
+    ) {
+      integrity("Surveillance publication scope index coverage failed");
+    }
+    const mismatch = this.#database
+      .prepare(
+        `SELECT publication.tenant_id, publication.publication_id
+           FROM surveillance_publications AS publication
+           LEFT JOIN surveillance_publication_scope_index AS scope_index
+             ON scope_index.tenant_id = publication.tenant_id
+            AND scope_index.publication_id = publication.publication_id
+          WHERE scope_index.publication_id IS NULL
+             OR scope_index.publication_hash IS NOT publication.publication_hash
+             OR scope_index.dataset_id IS NOT json_extract(publication.publication_json, '$.datasetId')
+             OR scope_index.source_contract_id IS NOT json_extract(publication.publication_json, '$.sourceContract.sourceContractId')
+             OR scope_index.source_contract_key IS NOT json_extract(publication.publication_json, '$.sourceContract.sourceKey')
+             OR scope_index.source_contract_revision IS NOT json_extract(publication.publication_json, '$.sourceContract.revision')
+             OR scope_index.source_contract_hash IS NOT json_extract(publication.publication_json, '$.sourceContract.sourceContractHash')
+             OR scope_index.scope_type IS NOT json_extract(publication.publication_json, '$.scope.scopeType')
+             OR scope_index.scope_id IS NOT json_extract(publication.publication_json, '$.scope.scopeId')
+             OR scope_index.as_of_date IS NOT json_extract(publication.publication_json, '$.snapshot.asOfDate')
+             OR scope_index.published_at IS NOT publication.published_at
+          LIMIT 1`
+      )
+      .get();
+    const orphan = this.#database
+      .prepare(
+        `SELECT scope_index.tenant_id, scope_index.publication_id
+           FROM surveillance_publication_scope_index AS scope_index
+           LEFT JOIN surveillance_publications AS publication
+             ON publication.tenant_id = scope_index.tenant_id
+            AND publication.publication_id = scope_index.publication_id
+          WHERE publication.publication_id IS NULL
+          LIMIT 1`
+      )
+      .get();
+    if (mismatch !== undefined || orphan !== undefined) {
+      integrity("Surveillance publication scope index projection failed");
+    }
+  }
 }
 
-const SURVEILLANCE_PUBLICATION_CATALOG_SCHEMA = `
+// This is the exact schema shipped at catalog version one. Never rewrite it:
+// registered v1 databases must attest byte-for-byte before the additive index
+// migration runs.
+const SURVEILLANCE_PUBLICATION_CATALOG_SCHEMA_V1 = `
 CREATE TABLE surveillance_publications (
   tenant_id TEXT NOT NULL,
   publication_id TEXT NOT NULL,
@@ -550,6 +703,98 @@ CREATE TRIGGER surveillance_publication_idempotency_no_delete BEFORE DELETE ON s
 BEGIN SELECT RAISE(ABORT, 'surveillance publication idempotency is immutable'); END;
 `;
 
+/**
+ * Adds a fully bounded, exact lineage-selection index without rebuilding any
+ * immutable v1 table. Existing publications are backfilled transactionally;
+ * malformed legacy JSON violates the STRICT constraints and rolls the whole
+ * component migration back to v1.
+ */
+const SURVEILLANCE_PUBLICATION_CATALOG_MIGRATION_V2 = `
+CREATE TABLE surveillance_publication_scope_index (
+  tenant_id TEXT NOT NULL,
+  publication_id TEXT NOT NULL,
+  publication_hash TEXT NOT NULL CHECK (
+    publication_hash GLOB 'sha256:[0-9a-f]*' AND length(publication_hash) = 71
+  ),
+  dataset_id TEXT NOT NULL,
+  source_contract_id TEXT NOT NULL,
+  source_contract_key TEXT NOT NULL,
+  source_contract_revision INTEGER NOT NULL CHECK (
+    typeof(source_contract_revision) = 'integer' AND
+    source_contract_revision BETWEEN 1 AND 1000000
+  ),
+  source_contract_hash TEXT NOT NULL CHECK (
+    source_contract_hash GLOB 'sha256:[0-9a-f]*' AND length(source_contract_hash) = 71
+  ),
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('portfolio','facility')),
+  scope_id TEXT NOT NULL,
+  as_of_date TEXT NOT NULL CHECK (
+    length(as_of_date) = 10 AND
+    as_of_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+  ),
+  published_at TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, publication_id),
+  FOREIGN KEY (tenant_id, publication_id)
+    REFERENCES surveillance_publications (tenant_id, publication_id)
+) STRICT;
+
+INSERT INTO surveillance_publication_scope_index (
+  tenant_id, publication_id, publication_hash, dataset_id,
+  source_contract_id, source_contract_key, source_contract_revision,
+  source_contract_hash, scope_type, scope_id, as_of_date, published_at
+)
+SELECT tenant_id,
+       publication_id,
+       publication_hash,
+       json_extract(publication_json, '$.datasetId'),
+       json_extract(publication_json, '$.sourceContract.sourceContractId'),
+       json_extract(publication_json, '$.sourceContract.sourceKey'),
+       json_extract(publication_json, '$.sourceContract.revision'),
+       json_extract(publication_json, '$.sourceContract.sourceContractHash'),
+       json_extract(publication_json, '$.scope.scopeType'),
+       json_extract(publication_json, '$.scope.scopeId'),
+       json_extract(publication_json, '$.snapshot.asOfDate'),
+       published_at
+  FROM surveillance_publications
+ ORDER BY tenant_id, publication_id;
+
+CREATE INDEX surveillance_publication_scope_lookup
+  ON surveillance_publication_scope_index (
+    tenant_id, dataset_id, source_contract_id, source_contract_key,
+    source_contract_revision, source_contract_hash, scope_type, scope_id,
+    as_of_date, published_at, publication_id
+  );
+CREATE TRIGGER surveillance_publication_scope_index_no_update
+BEFORE UPDATE ON surveillance_publication_scope_index
+BEGIN SELECT RAISE(ABORT, 'surveillance publication scope index is immutable'); END;
+CREATE TRIGGER surveillance_publication_scope_index_no_delete
+BEFORE DELETE ON surveillance_publication_scope_index
+BEGIN SELECT RAISE(ABORT, 'surveillance publication scope index is immutable'); END;
+
+CREATE TRIGGER surveillance_publications_scope_index_insert
+AFTER INSERT ON surveillance_publications
+BEGIN
+  INSERT INTO surveillance_publication_scope_index (
+    tenant_id, publication_id, publication_hash, dataset_id,
+    source_contract_id, source_contract_key, source_contract_revision,
+    source_contract_hash, scope_type, scope_id, as_of_date, published_at
+  ) VALUES (
+    NEW.tenant_id,
+    NEW.publication_id,
+    NEW.publication_hash,
+    json_extract(NEW.publication_json, '$.datasetId'),
+    json_extract(NEW.publication_json, '$.sourceContract.sourceContractId'),
+    json_extract(NEW.publication_json, '$.sourceContract.sourceKey'),
+    json_extract(NEW.publication_json, '$.sourceContract.revision'),
+    json_extract(NEW.publication_json, '$.sourceContract.sourceContractHash'),
+    json_extract(NEW.publication_json, '$.scope.scopeType'),
+    json_extract(NEW.publication_json, '$.scope.scopeId'),
+    json_extract(NEW.publication_json, '$.snapshot.asOfDate'),
+    NEW.published_at
+  );
+END;
+`;
+
 interface PublicationRow {
   readonly tenant_id: string;
   readonly publication_id: string;
@@ -559,6 +804,19 @@ interface PublicationRow {
   readonly published_by: string;
   readonly published_at: string;
   readonly publication_json: string;
+}
+
+interface PublicationScopeIndexRow extends PublicationRow {
+  readonly indexed_dataset_id: string;
+  readonly indexed_source_contract_id: string;
+  readonly indexed_source_contract_key: string;
+  readonly indexed_source_contract_revision: number;
+  readonly indexed_source_contract_hash: string;
+  readonly indexed_scope_type: "portfolio" | "facility";
+  readonly indexed_scope_id: string;
+  readonly indexed_as_of_date: string;
+  readonly indexed_published_at: string;
+  readonly indexed_publication_hash: string;
 }
 
 interface DisableRow {
@@ -604,6 +862,27 @@ function publicationFromRow(row: PublicationRow): CertifiedSnapshotPublicationV1
     publication.publishedAt !== row.published_at
   ) {
     integrity("Surveillance publication columns do not match immutable JSON");
+  }
+  return publication;
+}
+
+function publicationFromScopeIndexRow(
+  row: PublicationScopeIndexRow
+): CertifiedSnapshotPublicationV1 {
+  const publication = publicationFromRow(row);
+  if (
+    publication.datasetId !== row.indexed_dataset_id ||
+    publication.sourceContract.sourceContractId !== row.indexed_source_contract_id ||
+    publication.sourceContract.sourceKey !== row.indexed_source_contract_key ||
+    publication.sourceContract.revision !== row.indexed_source_contract_revision ||
+    publication.sourceContract.sourceContractHash !== row.indexed_source_contract_hash ||
+    publication.scope.scopeType !== row.indexed_scope_type ||
+    publication.scope.scopeId !== row.indexed_scope_id ||
+    publication.snapshot.asOfDate !== row.indexed_as_of_date ||
+    publication.publishedAt !== row.indexed_published_at ||
+    publication.publicationHash !== row.indexed_publication_hash
+  ) {
+    integrity("Surveillance publication scope index does not match immutable JSON");
   }
   return publication;
 }
@@ -655,6 +934,73 @@ function verifyAuditRows(rows: readonly AuditRow[]): readonly SurveillancePublic
     previousOccurredAt = event.occurredAt;
     return Object.freeze(event);
   });
+}
+
+function validateScopeQuery(
+  query: SurveillancePublicationScopeQueryV1
+): SurveillancePublicationScopeQueryV1 {
+  if (!query || typeof query !== "object" || Array.isArray(query)) {
+    invalid("Surveillance publication scope query is invalid");
+  }
+  exactKeys(query, [
+    "asOfDate",
+    "datasetId",
+    "maximumResults",
+    "publishedThrough",
+    "scope",
+    "sourceContract",
+    "tenantId"
+  ], "Surveillance publication scope query");
+  if (!query.sourceContract || typeof query.sourceContract !== "object") {
+    invalid("Surveillance publication source-contract selector is invalid");
+  }
+  exactKeys(query.sourceContract, [
+    "revision",
+    "sourceContractHash",
+    "sourceContractId",
+    "sourceKey"
+  ], "Surveillance publication source-contract selector");
+  if (!query.scope || typeof query.scope !== "object") {
+    invalid("Surveillance publication scope selector is invalid");
+  }
+  exactKeys(query.scope, ["scopeId", "scopeType"], "Surveillance publication scope selector");
+  const scopeType = query.scope.scopeType;
+  if (scopeType !== "portfolio" && scopeType !== "facility") {
+    invalid("Surveillance publication scope type is invalid");
+  }
+  return Object.freeze({
+    tenantId: identifier(query.tenantId, "tenantId"),
+    datasetId: identifier(query.datasetId, "datasetId"),
+    sourceContract: Object.freeze({
+      sourceContractId: identifier(query.sourceContract.sourceContractId, "sourceContractId"),
+      sourceKey: identifier(query.sourceContract.sourceKey, "sourceKey"),
+      revision: integer(query.sourceContract.revision, "source contract revision", 1, 1_000_000),
+      sourceContractHash: inputContract(() =>
+        parseWithSchema(
+          Sha256HashSchema,
+          query.sourceContract.sourceContractHash,
+          "sourceContractHash"
+        )
+      )
+    }),
+    scope: Object.freeze({
+      scopeType,
+      scopeId: identifier(query.scope.scopeId, "scopeId")
+    }),
+    asOfDate: inputContract(() =>
+      parseWithSchema(IsoDateSchema, query.asOfDate, "asOfDate")
+    ),
+    publishedThrough: inputContract(() =>
+      parseWithSchema(IsoTimestampSchema, query.publishedThrough, "publishedThrough")
+    ),
+    maximumResults: integer(query.maximumResults, "maximumResults", 1, 1_000)
+  });
+}
+
+function exactKeys(value: object, expected: readonly string[], label: string): void {
+  if (canonicalJson(Object.keys(value).sort()) !== canonicalJson([...expected].sort())) {
+    invalid(`${label} contains missing or unsupported fields`);
+  }
 }
 
 function validateRecord(input: RecordSurveillancePublicationInput): RecordSurveillancePublicationInput {
