@@ -11,6 +11,7 @@ import {
   parseHistoricalRuntimeBundleV1,
   parseMappingSpecV2,
   parseSourceContractV1,
+  type SnapshotCertificationAttemptV1,
   type CertifiedSnapshotEvidenceRecordV1,
   type DatasetSnapshotV2,
   type GovernedDatasetScopeBindingV1,
@@ -45,6 +46,7 @@ import {
   type SegmentedControlTotalV2
 } from "../domain/data-quality-v2.js";
 import { RepositoryError, type ImmutableRepositoryPort } from "../repositories/ports.js";
+import type { SnapshotCertificationAttemptStoreV1 } from "../repositories/snapshot-certification-attempts-v1.js";
 import {
   executeMappingSpecV2,
   type MappingDimensionLookupV1,
@@ -311,6 +313,8 @@ export interface ModernSnapshotCertificationServiceDependencies {
     ImmutableRepositoryPort<CertifiedSnapshotEvidenceRecordV1>,
     "get" | "put"
   >;
+  /** Locks certification time and immutable request identity before artifact materialization. */
+  readonly attempts: SnapshotCertificationAttemptStoreV1;
   readonly sourceEvidence: ModernSnapshotSourceEvidenceAuthorityV1;
   readonly definitions: ModernCertificationDefinitionAuthorityV1;
   readonly runtime: HistoricalRuntimeResolver;
@@ -365,7 +369,6 @@ export class ModernSnapshotCertificationService {
       "OPERATOR_REQUIRED"
     );
     const request = resolveCertificationRequest(publicRequest, actor.tenantId);
-    const certifiedAt = parsed(IsoTimestampSchema, this.#dependencies.now(), "trusted clock");
     const snapshot = await this.#dependencies.snapshots.get(actor.tenantId, request.snapshotId);
     if (!snapshot) fail("NOT_FOUND", "Dataset snapshot was not found in the actor tenant");
     if (snapshot.tenantId !== actor.tenantId || snapshot.snapshotId !== request.snapshotId) {
@@ -390,6 +393,9 @@ export class ModernSnapshotCertificationService {
       request.certificationManifestId
     );
     if (existing) return this.#replay(request, actor, snapshot, existing);
+
+    const attempt = await this.#attempt(request, actor, snapshot);
+    const certifiedAt = attempt.certifiedAt;
 
     const deliveryValue = await this.#dependencies.sourceDeliveries.resolveGovernedDeliveryForCapture({
       tenantId: actor.tenantId,
@@ -643,6 +649,38 @@ export class ModernSnapshotCertificationService {
       fail("INTEGRITY_FAILURE", "Replayed certification no longer resolves its exact normalized artifact");
     }
     return Object.freeze({ evidence, replayed: true });
+  }
+
+  async #attempt(
+    request: ResolvedCertifySnapshotV2Request,
+    actor: TrustedCertificationActorV1,
+    snapshot: DatasetSnapshotV2
+  ): Promise<SnapshotCertificationAttemptV1> {
+    const timestamp = parsed(IsoTimestampSchema, this.#dependencies.now(), "trusted clock");
+    try {
+      const result = await this.#dependencies.attempts.startOrReplay({
+        tenantId: actor.tenantId,
+        certificationManifestId: request.certificationManifestId,
+        snapshotId: snapshot.snapshotId,
+        snapshotHash: snapshot.snapshotHash,
+        actorId: actor.actorId,
+        requestHash: canonicalHash({
+          contractVersion: 1,
+          tenantId: actor.tenantId,
+          actorId: actor.actorId,
+          snapshotId: request.snapshotId,
+          mappingApplicationId: request.mappingApplicationId,
+          normalizedPopulationId: request.normalizedPopulationId,
+          certificationManifestId: request.certificationManifestId,
+          idempotencyKey: request.idempotencyKey
+        }),
+        certifiedAt: timestamp,
+        createdAt: timestamp
+      });
+      return result.attempt;
+    } catch {
+      fail("INTEGRITY_FAILURE", "Certification attempt receipt could not be persisted or replayed");
+    }
   }
 
   #validateReceipt(

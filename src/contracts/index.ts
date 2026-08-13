@@ -16,3 +16,4 @@ export * from "./normalized-snapshot-artifact-v2.js";
 export * from "./source-access-policy-v1.js";
 export * from "./source-contract-v1.js";
 export * from "./source-delivery-authority-v1.js";
+export * from "./snapshot-certification-attempt-v1.js";

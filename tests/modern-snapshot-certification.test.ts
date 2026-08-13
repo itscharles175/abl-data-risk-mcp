@@ -10,6 +10,7 @@ import {
   createGovernedDatasetScopeBindingV1,
   createHistoricalRuntimeBundleV1,
   createMappingSpecV2,
+  createSnapshotCertificationAttemptV1,
   createSourceContractV1,
   InMemoryHistoricalRuntimeResolver,
   type DatasetSnapshotV2,
@@ -17,6 +18,7 @@ import {
   type GovernedDatasetScopeBindingV1,
   type ImmutableBundleReferenceV1,
   type Sha256Hash,
+  type SnapshotCertificationAttemptV1,
   type SourceContractV1
 } from "../src/contracts/index.js";
 import {
@@ -29,6 +31,10 @@ import { InMemoryImmutableRepository } from "../src/repositories/in-memory.js";
 import {
   SqliteSurveillanceEvidenceRepositories
 } from "../src/repositories/sqlite-surveillance.js";
+import type {
+  SnapshotCertificationAttemptStoreV1,
+  StartSnapshotCertificationAttemptV1
+} from "../src/repositories/snapshot-certification-attempts-v1.js";
 import {
   ModernSnapshotCertificationError,
   ModernSnapshotCertificationService,
@@ -89,6 +95,34 @@ test("exact certified replay does not consult mutable live-delivery authority", 
     assert.equal(replay.replayed, true);
     assert.equal(replay.evidence.evidenceHash, first.evidence.evidenceHash);
     assert.equal(fixture.deliveryLoads, 1);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("a failed evidence write reuses its immutable certification attempt and normalized artifact", async () => {
+  const fixture = await createFixture({ evidencePutFailsOnce: true });
+  try {
+    await assert.rejects(
+      () => fixture.service.certify(fixture.request, fixture.actor),
+      /simulated evidence persistence failure/
+    );
+    assert.equal(fixture.artifactWrites, 1);
+    fixture.setNow("2026-08-02T11:00:00.000Z");
+
+    const retry = await fixture.service.certify(fixture.request, fixture.actor);
+    assert.equal(retry.replayed, false);
+    assert.equal(retry.evidence.certification.certifiedAt, "2026-08-02T10:00:00.000Z");
+    assert.equal(retry.evidence.normalizedArtifact.createdAt, "2026-08-02T10:00:00.000Z");
+    assert.equal(fixture.artifactWrites, 2);
+    assert.deepEqual(fixture.artifactIds, [
+      retry.evidence.normalizedArtifact.artifactId,
+      retry.evidence.normalizedArtifact.artifactId
+    ]);
+
+    const replay = await fixture.service.certify(fixture.request, fixture.actor);
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.evidence.evidenceHash, retry.evidence.evidenceHash);
   } finally {
     fixture.close();
   }
@@ -321,6 +355,7 @@ interface FixtureOptions {
   readonly tamperSourceDocument?: boolean;
   readonly forgeBindingDocument?: boolean;
   readonly effectiveTo?: string;
+  readonly evidencePutFailsOnce?: boolean;
 }
 
 async function createFixture(options: FixtureOptions = {}) {
@@ -502,8 +537,12 @@ async function createFixture(options: FixtureOptions = {}) {
   let sourceLoads = 0;
   let definitionLoads = 0;
   let artifactWrites = 0;
+  const artifactIds: string[] = [];
   let deliveryLoads = 0;
   let deliveryAvailable = true;
+  let evidencePutFailuresRemaining = options.evidencePutFailsOnce ? 1 : 0;
+  let now = "2026-08-02T10:00:00.000Z";
+  const attempts = new InMemorySnapshotCertificationAttemptStore();
   const receipts = new InMemoryImmutableRepository<ModernSnapshotExtractionReceiptV1>(
     "modern-certification-receipts",
     (record) => record.receiptId
@@ -557,7 +596,19 @@ async function createFixture(options: FixtureOptions = {}) {
         return deliveryResolution;
       }
     },
-    certifiedEvidence: repositories.certifiedSnapshotEvidence,
+    certifiedEvidence: {
+      get(tenantId, recordId) {
+        return repositories.certifiedSnapshotEvidence.get(tenantId, recordId);
+      },
+      async put(record, context) {
+        if (evidencePutFailuresRemaining > 0) {
+          evidencePutFailuresRemaining -= 1;
+          throw new Error("simulated evidence persistence failure");
+        }
+        return repositories.certifiedSnapshotEvidence.put(record, context);
+      }
+    },
+    attempts,
     sourceEvidence: {
       async loadSection(input) {
         sourceLoads += 1;
@@ -582,13 +633,15 @@ async function createFixture(options: FixtureOptions = {}) {
     artifacts: {
       putJson(input) {
         artifactWrites += 1;
-        return artifacts.putJson(input);
+        const stored = artifacts.putJson(input);
+        artifactIds.push(stored.artifactId);
+        return stored;
       },
       getJson(tenantId, artifactId) {
         return artifacts.getJson(tenantId, artifactId);
       }
     },
-    now: () => "2026-08-02T10:00:00.000Z"
+    now: () => now
   });
   const request: CertifySnapshotV2Request = {
     snapshotId: snapshot.snapshotId
@@ -608,10 +661,35 @@ async function createFixture(options: FixtureOptions = {}) {
     get sourceLoads() { return sourceLoads; },
     get definitionLoads() { return definitionLoads; },
     get artifactWrites() { return artifactWrites; },
+    get artifactIds() { return [...artifactIds]; },
     get deliveryLoads() { return deliveryLoads; },
     makeDeliveryUnavailable() { deliveryAvailable = false; },
+    setNow(value: string) { now = value; },
     close: () => repositories.close()
   };
+}
+
+class InMemorySnapshotCertificationAttemptStore implements SnapshotCertificationAttemptStoreV1 {
+  readonly #attempts = new Map<string, SnapshotCertificationAttemptV1>();
+
+  async startOrReplay(input: StartSnapshotCertificationAttemptV1) {
+    const key = `${input.tenantId}:${input.certificationManifestId}`;
+    const existing = this.#attempts.get(key);
+    if (existing) {
+      if (
+        existing.snapshotId !== input.snapshotId ||
+        existing.snapshotHash !== input.snapshotHash ||
+        existing.actorId !== input.actorId ||
+        existing.requestHash !== input.requestHash
+      ) {
+        throw new Error("attempt identity conflict");
+      }
+      return Object.freeze({ attempt: existing, replayed: true });
+    }
+    const attempt = createSnapshotCertificationAttemptV1({ contractVersion: 1, ...input });
+    this.#attempts.set(key, attempt);
+    return Object.freeze({ attempt, replayed: false });
+  }
 }
 
 function certificationManifestId(tenantId: string, snapshotId: string) {
