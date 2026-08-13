@@ -12,6 +12,7 @@ import {
   type Sha256Hash,
   type SourceContractV1
 } from "../contracts/index.js";
+import type { CapturedSourceSectionArtifactV1Input } from "../contracts/captured-source-section-artifact-v1.js";
 import {
   parseGovernedSourceDeliveryRecordV1,
   type GovernedSourceDeliveryRecordV1,
@@ -40,12 +41,15 @@ const EXTRACTION_KEYS = new Set([
   "hashes",
   "knowledge",
   "rowCount",
+  "sourceSections",
   "sections",
   "snapshotId",
   "tenantId",
   "watermark"
 ]);
-const EXTRACTION_REQUIRED_KEYS = EXTRACTION_KEYS;
+const EXTRACTION_REQUIRED_KEYS = new Set(
+  [...EXTRACTION_KEYS].filter((key) => key !== "sourceSections")
+);
 const EXTRACTION_HASH_KEYS = new Set([
   "catalogHash",
   "contentHash",
@@ -165,6 +169,11 @@ export interface TrustedModernSnapshotExtractionV1 {
   readonly elapsedMs: number;
   readonly sections: DatasetSnapshotV2Input["sections"];
   readonly correction: DatasetSnapshotV2Input["correction"];
+  /** Exact scalar rows retained only inside a trusted capture boundary. */
+  readonly sourceSections?: readonly Readonly<{
+    readonly sectionId: string;
+    readonly records: readonly Readonly<Record<string, string | boolean | number | null>>[];
+  }>[];
 }
 
 export interface TrustedModernSnapshotExtractionAuthorityV1 {
@@ -228,6 +237,26 @@ export interface ModernSnapshotCaptureResultV1 {
   readonly snapshotReplayed: boolean;
 }
 
+/** Optional until a composed runtime makes durable source-material mandatory. */
+export interface CapturedSourceMaterialCapturePortV1 {
+  publish(input: CapturedSourceSectionArtifactV1Input): Promise<unknown>;
+  /**
+   * Returns the immutable pre-receipt capture identity from any already
+   * materialized expected section. The retry must reconstruct that identity
+   * exactly before it can fill a crash-interrupted partial section set.
+   */
+  resolveReplayIdentity?(input: {
+    readonly tenantId: string;
+    readonly snapshotId: string;
+    readonly sourceContract: DatasetSnapshotV2Input["sourceContract"];
+    readonly sectionIds: readonly string[];
+  }): Promise<{
+    readonly snapshotHash: Sha256Hash;
+    readonly extractionReceiptHash: Sha256Hash;
+    readonly capturedAt: string;
+  } | undefined>;
+}
+
 export type ModernSnapshotCaptureErrorCode =
   | "INVALID_REQUEST"
   | "OPERATOR_REQUIRED"
@@ -254,6 +283,7 @@ export class ModernSnapshotCaptureServiceV1 {
   readonly #extraction: TrustedModernSnapshotExtractionAuthorityV1;
   readonly #receipts: ImmutableRepositoryPort<ModernSnapshotExtractionReceiptV1>;
   readonly #snapshots: GovernedDatasetSnapshotCommitRepositoryV1;
+  readonly #sourceMaterial: CapturedSourceMaterialCapturePortV1 | undefined;
   readonly #now: () => string;
 
   constructor(input: {
@@ -261,12 +291,14 @@ export class ModernSnapshotCaptureServiceV1 {
     readonly extraction: TrustedModernSnapshotExtractionAuthorityV1;
     readonly receipts: ImmutableRepositoryPort<ModernSnapshotExtractionReceiptV1>;
     readonly snapshots: GovernedDatasetSnapshotCommitRepositoryV1;
+    readonly sourceMaterial?: CapturedSourceMaterialCapturePortV1;
     readonly now?: () => string;
   }) {
     this.#sourceDeliveries = input.sourceDeliveries;
     this.#extraction = input.extraction;
     this.#receipts = input.receipts;
     this.#snapshots = input.snapshots;
+    this.#sourceMaterial = input.sourceMaterial;
     this.#now = input.now ?? (() => new Date().toISOString());
   }
 
@@ -353,7 +385,8 @@ export class ModernSnapshotCaptureServiceV1 {
     assertExtractionPolicy(extraction, source);
     assertDeliveryExtraction(extraction, sourceDelivery);
 
-    const persistedAt = this.#now();
+    const replayIdentity = await this.#resolveMaterialReplayIdentity(extraction, actor, request, sourceReference);
+    const persistedAt = replayIdentity?.capturedAt ?? this.#now();
     if (
       source.approvedAt === undefined ||
       source.approvedAt > extraction.knowledge.extractedAt ||
@@ -393,6 +426,17 @@ export class ModernSnapshotCaptureServiceV1 {
         createdBy: actor.actorId
       })
     );
+    if (
+      replayIdentity !== undefined &&
+      (snapshot.snapshotHash !== replayIdentity.snapshotHash ||
+        receipt.receiptHash !== replayIdentity.extractionReceiptHash)
+    ) {
+      invalid(
+        "EVIDENCE_INVALID",
+        "Interrupted capture retry no longer reconstructs its immutable source-material lineage"
+      );
+    }
+    await this.#persistSourceMaterial(extraction, snapshot, receipt);
     const receiptResult = await this.#receipts.put(receipt, {
       tenantId: actor.tenantId,
       actorId: actor.actorId,
@@ -413,6 +457,103 @@ export class ModernSnapshotCaptureServiceV1 {
       receiptReplayed: receiptResult.replayed,
       snapshotReplayed: snapshotResult.replayed
     });
+  }
+
+  async #persistSourceMaterial(
+    extraction: TrustedModernSnapshotExtractionV1,
+    snapshot: DatasetSnapshotV2,
+    receipt: ModernSnapshotExtractionReceiptV1
+  ): Promise<void> {
+    if (this.#sourceMaterial === undefined) return;
+    const supplied = extraction.sourceSections;
+    if (supplied === undefined) {
+      invalid("EVIDENCE_INVALID", "Composed capture requires exact source-section records");
+    }
+    const bySection = new Map<string, readonly Readonly<Record<string, string | boolean | number | null>>[]>();
+    for (const section of supplied) {
+      if (
+        section === null ||
+        typeof section !== "object" ||
+        Array.isArray(section) ||
+        Object.keys(section).length !== 2 ||
+        !("sectionId" in section) ||
+        !("records" in section) ||
+        typeof section.sectionId !== "string" ||
+        !Array.isArray(section.records) ||
+        bySection.has(section.sectionId)
+      ) {
+        invalid("EVIDENCE_INVALID", "Source-section material has an invalid shape");
+      }
+      bySection.set(section.sectionId, section.records);
+    }
+    const expected = snapshot.sections.filter((section) => section.present);
+    if (bySection.size !== expected.length || expected.some((section) => !bySection.has(section.sectionId))) {
+      invalid("EVIDENCE_INVALID", "Source-section material does not cover the captured section set");
+    }
+    for (const section of expected) {
+      const records = bySection.get(section.sectionId)!;
+      if (
+        records.length !== section.rowCount ||
+        section.contentHash === undefined ||
+        section.schemaHash === undefined ||
+        section.controlPopulationHash === undefined ||
+        canonicalHash(records) !== section.controlPopulationHash
+      ) {
+        invalid("EVIDENCE_INVALID", "Source-section records do not match immutable section controls");
+      }
+      const input: CapturedSourceSectionArtifactV1Input = {
+        contractVersion: 1,
+        kind: "captured_source_section",
+        tenantId: snapshot.tenantId,
+        snapshotId: snapshot.snapshotId,
+        snapshotHash: snapshot.snapshotHash,
+        extractionReceiptHash: receipt.receiptHash,
+        sourceContract: snapshot.sourceContract,
+        sectionId: section.sectionId,
+        sectionContentHash: section.contentHash,
+        sectionSchemaHash: section.schemaHash,
+        controlPopulationHash: section.controlPopulationHash,
+        rowCount: records.length,
+        records: records.map((record) => ({ ...record })),
+        capturedAt: receipt.knowledge.persistedAt
+      };
+      try {
+        await this.#sourceMaterial.publish(input);
+      } catch {
+        invalid("EVIDENCE_INVALID", "Captured source-section material could not be persisted");
+      }
+    }
+  }
+
+  async #resolveMaterialReplayIdentity(
+    extraction: TrustedModernSnapshotExtractionV1,
+    actor: TrustedModernSnapshotCaptureActorV1,
+    request: ResolvedModernSnapshotCaptureRequestV1,
+    sourceContract: DatasetSnapshotV2Input["sourceContract"]
+  ): Promise<
+    | {
+        readonly snapshotHash: Sha256Hash;
+        readonly extractionReceiptHash: Sha256Hash;
+        readonly capturedAt: string;
+      }
+    | undefined
+  > {
+    const resolve = this.#sourceMaterial?.resolveReplayIdentity;
+    if (resolve === undefined) return undefined;
+    const sectionIds = extraction.sections
+      .filter((section) => section.present)
+      .map((section) => section.sectionId)
+      .sort();
+    try {
+      return await resolve({
+        tenantId: actor.tenantId,
+        snapshotId: request.snapshotId,
+        sourceContract,
+        sectionIds
+      });
+    } catch {
+      invalid("EVIDENCE_INVALID", "Captured source material could not recover an interrupted capture identity");
+    }
   }
 
   async #recoverOrReplay(

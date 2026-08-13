@@ -5,6 +5,7 @@ export * from "./certification-artifact-staging-v1.js";
 export * from "./certified-operation-input-v1.js";
 export * from "./certified-snapshot-evidence-v1.js";
 export * from "./certified-snapshot-publication-v1.js";
+export * from "./captured-source-section-artifact-v1.js";
 export * from "./dataset-scope-binding-v1.js";
 export * from "./dataset-snapshot-v2.js";
 export * from "./fx-evidence-v1.js";

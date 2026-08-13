@@ -31,6 +31,7 @@ import { InMemoryImmutableRepository } from "../src/repositories/in-memory.js";
 import {
   SqliteSurveillanceEvidenceRepositories
 } from "../src/repositories/sqlite-surveillance.js";
+import { SqliteCertificationArtifactStagingStoreV1 } from "../src/repositories/certification-artifact-staging-v1.js";
 import type {
   SnapshotCertificationAttemptStoreV1,
   StartSnapshotCertificationAttemptV1
@@ -123,6 +124,47 @@ test("a failed evidence write reuses its immutable certification attempt and nor
     const replay = await fixture.service.certify(fixture.request, fixture.actor);
     assert.equal(replay.replayed, true);
     assert.equal(replay.evidence.evidenceHash, retry.evidence.evidenceHash);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("optional artifact staging preserves failure lineage, commits the exact evidence, and verifies replay", async () => {
+  const fixture = await createFixture({ evidencePutFailsOnce: true, artifactStaging: true });
+  try {
+    await assert.rejects(
+      () => fixture.service.certify(fixture.request, fixture.actor),
+      /simulated evidence persistence failure/
+    );
+    const failed = await fixture.staging?.get({
+      tenantId: fixture.actor.tenantId,
+      certificationManifestId: fixture.certificationManifestId
+    });
+    assert.equal(failed?.state, "evidence_commit_failed");
+    assert.equal(failed?.events.length, 2);
+    assert.equal(failed?.events[1]?.eventType, "certification_evidence_failed");
+    assert.notEqual(failed?.latestFailureHash, undefined);
+
+    fixture.setNow("2026-08-02T11:00:00.000Z");
+    const retried = await fixture.service.certify(fixture.request, fixture.actor);
+    assert.equal(retried.replayed, false);
+    const committed = await fixture.staging?.get({
+      tenantId: fixture.actor.tenantId,
+      certificationManifestId: fixture.certificationManifestId
+    });
+    assert.equal(committed?.state, "evidence_committed");
+    assert.equal(committed?.certificationEvidenceHash, retried.evidence.evidenceHash);
+    assert.equal(committed?.events.length, 3);
+    assert.equal(committed?.stage.preparedAt, "2026-08-02T10:00:00.000Z");
+
+    const replay = await fixture.service.certify(fixture.request, fixture.actor);
+    assert.equal(replay.replayed, true);
+    const replayedStage = await fixture.staging?.get({
+      tenantId: fixture.actor.tenantId,
+      certificationManifestId: fixture.certificationManifestId
+    });
+    assert.equal(replayedStage?.events.length, 3);
+    assert.equal(replayedStage?.certificationEvidenceHash, replay.evidence.evidenceHash);
   } finally {
     fixture.close();
   }
@@ -356,6 +398,7 @@ interface FixtureOptions {
   readonly forgeBindingDocument?: boolean;
   readonly effectiveTo?: string;
   readonly evidencePutFailsOnce?: boolean;
+  readonly artifactStaging?: boolean;
 }
 
 async function createFixture(options: FixtureOptions = {}) {
@@ -543,6 +586,9 @@ async function createFixture(options: FixtureOptions = {}) {
   let evidencePutFailuresRemaining = options.evidencePutFailsOnce ? 1 : 0;
   let now = "2026-08-02T10:00:00.000Z";
   const attempts = new InMemorySnapshotCertificationAttemptStore();
+  const staging = options.artifactStaging
+    ? new SqliteCertificationArtifactStagingStoreV1(join(directory, "artifact-staging.sqlite"))
+    : undefined;
   const receipts = new InMemoryImmutableRepository<ModernSnapshotExtractionReceiptV1>(
     "modern-certification-receipts",
     (record) => record.receiptId
@@ -609,6 +655,7 @@ async function createFixture(options: FixtureOptions = {}) {
       }
     },
     attempts,
+    artifactStaging: staging,
     sourceEvidence: {
       async loadSection(input) {
         sourceLoads += 1;
@@ -663,9 +710,14 @@ async function createFixture(options: FixtureOptions = {}) {
     get artifactWrites() { return artifactWrites; },
     get artifactIds() { return [...artifactIds]; },
     get deliveryLoads() { return deliveryLoads; },
+    staging,
+    certificationManifestId: certificationManifestId(snapshot.tenantId, snapshot.snapshotId),
     makeDeliveryUnavailable() { deliveryAvailable = false; },
     setNow(value: string) { now = value; },
-    close: () => repositories.close()
+    close: () => {
+      staging?.close();
+      repositories.close();
+    }
   };
 }
 

@@ -23,8 +23,10 @@ import {
 import {
   createCertifiedSnapshotArtifactMetadataV1,
   createCertifiedSnapshotEvidenceRecordV1,
-  parseCertifiedSnapshotEvidenceRecordV1
+  parseCertifiedSnapshotEvidenceRecordV1,
+  type CertifiedSnapshotArtifactMetadataV1
 } from "../contracts/certified-snapshot-evidence-v1.js";
+import type { CertificationArtifactOutboxRecordV1 } from "../contracts/certification-artifact-staging-v1.js";
 import {
   createMappingApplicationV1,
   type MappingApplicationV1
@@ -46,6 +48,7 @@ import {
   type SegmentedControlTotalV2
 } from "../domain/data-quality-v2.js";
 import { RepositoryError, type ImmutableRepositoryPort } from "../repositories/ports.js";
+import type { CertificationArtifactStagingStoreV1 } from "../repositories/certification-artifact-staging-v1.js";
 import type { SnapshotCertificationAttemptStoreV1 } from "../repositories/snapshot-certification-attempts-v1.js";
 import {
   executeMappingSpecV2,
@@ -315,6 +318,8 @@ export interface ModernSnapshotCertificationServiceDependencies {
   >;
   /** Locks certification time and immutable request identity before artifact materialization. */
   readonly attempts: SnapshotCertificationAttemptStoreV1;
+  /** Optional crash-safe handoff record binding the normalized artifact to the immutable attempt. */
+  readonly artifactStaging?: CertificationArtifactStagingStoreV1;
   readonly sourceEvidence: ModernSnapshotSourceEvidenceAuthorityV1;
   readonly definitions: ModernCertificationDefinitionAuthorityV1;
   readonly runtime: HistoricalRuntimeResolver;
@@ -388,13 +393,13 @@ export class ModernSnapshotCertificationService {
     );
     this.#validateReceipt(receipt, snapshot);
 
+    const attempt = await this.#attempt(request, actor, snapshot);
     const existing = await this.#dependencies.certifiedEvidence.get(
       actor.tenantId,
       request.certificationManifestId
     );
-    if (existing) return this.#replay(request, actor, snapshot, existing);
+    if (existing) return this.#replay(request, actor, snapshot, attempt, existing);
 
-    const attempt = await this.#attempt(request, actor, snapshot);
     const certifiedAt = attempt.certifiedAt;
 
     const deliveryValue = await this.#dependencies.sourceDeliveries.resolveGovernedDeliveryForCapture({
@@ -575,6 +580,13 @@ export class ModernSnapshotCertificationService {
       artifact: reloadedNormalized,
       loadedStoredArtifact: loaded.metadata
     });
+    const artifactBindingHash = await this.#prepareArtifactStage({
+      request,
+      actor,
+      attempt,
+      artifactMetadata,
+      preparedAt: certifiedAt
+    });
 
     const evidence = this.#buildEvidence({
       request,
@@ -602,7 +614,24 @@ export class ModernSnapshotCertificationService {
         actorId: actor.actorId,
         idempotencyKey: request.idempotencyKey
       });
-      return Object.freeze({ evidence: put.record, replayed: put.replayed });
+      const persisted = certificationEvidence(
+        () => parseCertifiedSnapshotEvidenceRecordV1(put.record),
+        "Persisted certification evidence"
+      );
+      if (canonicalJson(persisted) !== canonicalJson(evidence)) {
+        if (put.replayed) return this.#replay(request, actor, snapshot, attempt, persisted);
+        fail("INTEGRITY_FAILURE", "Certification evidence repository returned a substituted record");
+      }
+      await this.#recordArtifactStageCommit({
+        request,
+        actor,
+        attempt,
+        artifactMetadata,
+        artifactBindingHash,
+        evidence: persisted,
+        occurredAt: certifiedAt
+      });
+      return Object.freeze({ evidence: persisted, replayed: put.replayed });
     } catch (error) {
       if (
         error instanceof RepositoryError &&
@@ -612,8 +641,17 @@ export class ModernSnapshotCertificationService {
           actor.tenantId,
           request.certificationManifestId
         );
-        if (raced) return this.#replay(request, actor, snapshot, raced);
+        if (raced) return this.#replay(request, actor, snapshot, attempt, raced);
       }
+      await this.#recordArtifactStageFailure({
+        request,
+        actor,
+        attempt,
+        artifactMetadata,
+        artifactBindingHash,
+        occurredAt: certifiedAt,
+        error
+      });
       throw error;
     }
   }
@@ -622,6 +660,7 @@ export class ModernSnapshotCertificationService {
     request: ResolvedCertifySnapshotV2Request,
     actor: TrustedCertificationActorV1,
     snapshot: DatasetSnapshotV2,
+    attempt: SnapshotCertificationAttemptV1,
     existingValue: CertifiedSnapshotEvidenceRecordV1
   ): Promise<ModernSnapshotCertificationResultV1> {
     const evidence = parseCertifiedSnapshotEvidenceRecordV1(existingValue);
@@ -648,7 +687,174 @@ export class ModernSnapshotCertificationService {
     if (canonicalJson(metadata) !== canonicalJson(evidence.normalizedArtifact)) {
       fail("INTEGRITY_FAILURE", "Replayed certification no longer resolves its exact normalized artifact");
     }
+    const artifactBindingHash = this.#artifactBindingHash(request, actor, attempt, metadata);
+    await this.#recordArtifactStageCommit({
+      request,
+      actor,
+      attempt,
+      artifactMetadata: metadata,
+      artifactBindingHash,
+      evidence,
+      occurredAt: attempt.certifiedAt
+    });
     return Object.freeze({ evidence, replayed: true });
+  }
+
+  async #prepareArtifactStage(input: {
+    readonly request: ResolvedCertifySnapshotV2Request;
+    readonly actor: TrustedCertificationActorV1;
+    readonly attempt: SnapshotCertificationAttemptV1;
+    readonly artifactMetadata: CertifiedSnapshotArtifactMetadataV1;
+    readonly preparedAt: string;
+  }): Promise<Sha256Hash | undefined> {
+    const staging = this.#dependencies.artifactStaging;
+    if (!staging) return undefined;
+    const artifactBindingHash = this.#artifactBindingHash(
+      input.request,
+      input.actor,
+      input.attempt,
+      input.artifactMetadata
+    );
+    try {
+      const staged = await staging.prepareOrReplay({
+        contractVersion: 1,
+        tenantId: input.actor.tenantId,
+        certificationManifestId: input.request.certificationManifestId,
+        attemptHash: input.attempt.attemptHash,
+        normalizedArtifact: input.artifactMetadata,
+        artifactBindingHash,
+        preparedAt: input.preparedAt
+      });
+      this.#assertArtifactStage(
+        staged.record,
+        input.request,
+        input.actor,
+        input.attempt,
+        input.artifactMetadata,
+        artifactBindingHash
+      );
+      return artifactBindingHash;
+    } catch (error) {
+      if (error instanceof ModernSnapshotCertificationError) throw error;
+      fail("INTEGRITY_FAILURE", "Certification artifact stage could not be persisted or replayed");
+    }
+  }
+
+  async #recordArtifactStageCommit(input: {
+    readonly request: ResolvedCertifySnapshotV2Request;
+    readonly actor: TrustedCertificationActorV1;
+    readonly attempt: SnapshotCertificationAttemptV1;
+    readonly artifactMetadata: CertifiedSnapshotArtifactMetadataV1;
+    readonly artifactBindingHash: Sha256Hash | undefined;
+    readonly evidence: CertifiedSnapshotEvidenceRecordV1;
+    readonly occurredAt: string;
+  }): Promise<void> {
+    const staging = this.#dependencies.artifactStaging;
+    if (!staging) return;
+    if (input.artifactBindingHash === undefined) {
+      fail("INTEGRITY_FAILURE", "Certification artifact stage binding is unexpectedly absent");
+    }
+    try {
+      const committed = await staging.recordEvidenceCommitted({
+        tenantId: input.actor.tenantId,
+        certificationManifestId: input.request.certificationManifestId,
+        attemptHash: input.attempt.attemptHash,
+        artifactBindingHash: input.artifactBindingHash,
+        certificationEvidenceHash: input.evidence.evidenceHash,
+        occurredAt: input.occurredAt
+      });
+      this.#assertArtifactStage(
+        committed.record,
+        input.request,
+        input.actor,
+        input.attempt,
+        input.artifactMetadata,
+        input.artifactBindingHash,
+        input.evidence.evidenceHash
+      );
+    } catch (error) {
+      if (error instanceof ModernSnapshotCertificationError) throw error;
+      fail("INTEGRITY_FAILURE", "Certification artifact stage commit could not be persisted or verified");
+    }
+  }
+
+  async #recordArtifactStageFailure(input: {
+    readonly request: ResolvedCertifySnapshotV2Request;
+    readonly actor: TrustedCertificationActorV1;
+    readonly attempt: SnapshotCertificationAttemptV1;
+    readonly artifactMetadata: CertifiedSnapshotArtifactMetadataV1;
+    readonly artifactBindingHash: Sha256Hash | undefined;
+    readonly occurredAt: string;
+    readonly error: unknown;
+  }): Promise<void> {
+    const staging = this.#dependencies.artifactStaging;
+    if (!staging) return;
+    if (input.artifactBindingHash === undefined) {
+      fail("INTEGRITY_FAILURE", "Certification artifact stage binding is unexpectedly absent");
+    }
+    try {
+      const failed = await staging.recordEvidenceFailure({
+        tenantId: input.actor.tenantId,
+        certificationManifestId: input.request.certificationManifestId,
+        attemptHash: input.attempt.attemptHash,
+        artifactBindingHash: input.artifactBindingHash,
+        failureHash: canonicalHash({
+          contractVersion: 1,
+          kind: "certification_evidence_persistence_failure",
+          errorType: input.error instanceof Error ? input.error.name : typeof input.error
+        }),
+        occurredAt: input.occurredAt
+      });
+      this.#assertArtifactStage(
+        failed.record,
+        input.request,
+        input.actor,
+        input.attempt,
+        input.artifactMetadata,
+        input.artifactBindingHash
+      );
+    } catch (error) {
+      if (error instanceof ModernSnapshotCertificationError) throw error;
+      fail("INTEGRITY_FAILURE", "Certification artifact failure receipt could not be persisted or verified");
+    }
+  }
+
+  #artifactBindingHash(
+    request: ResolvedCertifySnapshotV2Request,
+    actor: TrustedCertificationActorV1,
+    attempt: SnapshotCertificationAttemptV1,
+    artifactMetadata: CertifiedSnapshotArtifactMetadataV1
+  ): Sha256Hash {
+    return canonicalHash({
+      contractVersion: 1,
+      tenantId: actor.tenantId,
+      certificationManifestId: request.certificationManifestId,
+      attemptHash: attempt.attemptHash,
+      normalizedArtifact: artifactMetadata
+    });
+  }
+
+  #assertArtifactStage(
+    record: CertificationArtifactOutboxRecordV1,
+    request: ResolvedCertifySnapshotV2Request,
+    actor: TrustedCertificationActorV1,
+    attempt: SnapshotCertificationAttemptV1,
+    artifactMetadata: CertifiedSnapshotArtifactMetadataV1,
+    artifactBindingHash: Sha256Hash,
+    certificationEvidenceHash?: Sha256Hash
+  ): void {
+    if (
+      record.stage.tenantId !== actor.tenantId ||
+      record.stage.certificationManifestId !== request.certificationManifestId ||
+      record.stage.attemptHash !== attempt.attemptHash ||
+      record.stage.artifactBindingHash !== artifactBindingHash ||
+      canonicalJson(record.stage.normalizedArtifact) !== canonicalJson(artifactMetadata) ||
+      (certificationEvidenceHash !== undefined &&
+        (record.state !== "evidence_committed" ||
+          record.certificationEvidenceHash !== certificationEvidenceHash))
+    ) {
+      fail("INTEGRITY_FAILURE", "Certification artifact stage does not bind the exact attempt, artifact, and evidence");
+    }
   }
 
   async #attempt(
