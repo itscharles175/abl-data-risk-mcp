@@ -1,6 +1,7 @@
 export * from "./bundles.js";
 export * from "./canonical.js";
 export * from "./certified-lineage-v1.js";
+export * from "./certification-artifact-staging-v1.js";
 export * from "./certified-operation-input-v1.js";
 export * from "./certified-snapshot-evidence-v1.js";
 export * from "./certified-snapshot-publication-v1.js";
