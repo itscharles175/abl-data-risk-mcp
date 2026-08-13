@@ -114,6 +114,18 @@ test("lifecycle-governed certification exclusively uses decision-time authority 
     assert.ok(first.evidenceV2);
     assert.deepEqual(parseCertifiedSnapshotEvidenceRecordV2(first.evidenceV2), first.evidenceV2);
     assert.equal(first.evidenceV2.v1Evidence.evidenceHash, first.evidence.evidenceHash);
+    assert.equal(
+      await fixture.repositories.certifiedSnapshotEvidence.get(
+        fixture.actor.tenantId,
+        fixture.certificationManifestId
+      ),
+      undefined,
+      "lifecycle certification must not dual-write legacy V1 evidence"
+    );
+    assert.deepEqual(
+      await fixture.certifiedEvidenceV2?.get(fixture.actor.tenantId, fixture.certificationManifestId),
+      first.evidenceV2
+    );
     assert.equal(fixture.definitionLoads, 0, "legacy definitions must never be consulted in lifecycle composition");
     assert.equal(fixture.lifecycleDefinitionLoads, 1);
 
@@ -123,6 +135,52 @@ test("lifecycle-governed certification exclusively uses decision-time authority 
     assert.equal(replay.evidenceV2.evidenceHash, first.evidenceV2.evidenceHash);
     assert.equal(fixture.definitionLoads, 0);
     assert.equal(fixture.lifecycleDefinitionLoads, 2);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("lifecycle certification fails before artifact materialization without a dedicated V2 repository", async () => {
+  const fixture = await createFixture({ lifecycleGoverned: true, lifecycleWithoutEvidenceV2: true });
+  try {
+    await assert.rejects(
+      fixture.service.certify(fixture.request, fixture.actor),
+      certificationCode("INTEGRITY_FAILURE")
+    );
+    assert.equal(fixture.artifactWrites, 0);
+    assert.equal(
+      await fixture.repositories.certifiedSnapshotEvidence.get(
+        fixture.actor.tenantId,
+        fixture.certificationManifestId
+      ),
+      undefined
+    );
+  } finally {
+    fixture.close();
+  }
+});
+
+test("lifecycle artifact staging commits the persisted V2 evidence hash", async () => {
+  const fixture = await createFixture({ lifecycleGoverned: true, artifactStaging: true });
+  try {
+    const result = await fixture.service.certify(fixture.request, fixture.actor);
+    assert.ok(result.evidenceV2);
+    assert.notEqual(result.evidenceV2.evidenceHash, result.evidence.evidenceHash);
+    const committed = await fixture.staging?.get({
+      tenantId: fixture.actor.tenantId,
+      certificationManifestId: fixture.certificationManifestId
+    });
+    assert.equal(committed?.state, "evidence_committed");
+    assert.equal(committed?.certificationEvidenceHash, result.evidenceV2.evidenceHash);
+
+    const replay = await fixture.service.certify(fixture.request, fixture.actor);
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.evidenceV2?.evidenceHash, result.evidenceV2.evidenceHash);
+    const replayed = await fixture.staging?.get({
+      tenantId: fixture.actor.tenantId,
+      certificationManifestId: fixture.certificationManifestId
+    });
+    assert.equal(replayed?.certificationEvidenceHash, result.evidenceV2.evidenceHash);
   } finally {
     fixture.close();
   }
@@ -475,6 +533,7 @@ interface FixtureOptions {
   readonly runtimeActivatedAfterAttempt?: boolean;
   readonly lifecycleGoverned?: boolean;
   readonly lifecycleWithoutRuntime?: boolean;
+  readonly lifecycleWithoutEvidenceV2?: boolean;
   readonly tamperLifecycleGovernance?: boolean;
 }
 
@@ -691,6 +750,12 @@ async function createFixture(options: FixtureOptions = {}) {
   let evidencePutFailuresRemaining = options.evidencePutFailsOnce ? 1 : 0;
   let now = "2026-08-02T10:00:00.000Z";
   const attempts = new InMemorySnapshotCertificationAttemptStore();
+  const certifiedEvidenceV2 = options.lifecycleGoverned && !options.lifecycleWithoutEvidenceV2
+    ? new InMemoryImmutableRepository<CertifiedSnapshotEvidenceRecordV2>(
+        "modern-certification-evidence-v2",
+        (record) => record.certificationAttempt.certificationManifestId
+      )
+    : undefined;
   const staging = options.artifactStaging
     ? new SqliteCertificationArtifactStagingStoreV1(join(directory, "artifact-staging.sqlite"))
     : undefined;
@@ -766,6 +831,7 @@ async function createFixture(options: FixtureOptions = {}) {
         return repositories.certifiedSnapshotEvidence.put(record, context);
       }
     },
+    ...(certifiedEvidenceV2 === undefined ? {} : { certifiedEvidenceV2 }),
     attempts,
     artifactStaging: staging,
     sourceEvidence: {
@@ -848,6 +914,7 @@ async function createFixture(options: FixtureOptions = {}) {
     request,
     actor,
     repositories,
+    certifiedEvidenceV2,
     artifacts,
     get sourceLoads() { return sourceLoads; },
     get definitionLoads() { return definitionLoads; },

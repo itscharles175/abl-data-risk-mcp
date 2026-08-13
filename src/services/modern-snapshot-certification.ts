@@ -28,6 +28,7 @@ import {
 } from "../contracts/certified-snapshot-evidence-v1.js";
 import {
   createCertifiedSnapshotEvidenceRecordV2,
+  parseCertifiedSnapshotEvidenceRecordV2,
   type CertifiedSnapshotEvidenceRecordV2
 } from "../contracts/certified-snapshot-evidence-v2.js";
 import type { CertificationArtifactOutboxRecordV1 } from "../contracts/certification-artifact-staging-v1.js";
@@ -348,6 +349,14 @@ export interface ModernSnapshotCertificationServiceDependencies {
     ImmutableRepositoryPort<CertifiedSnapshotEvidenceRecordV1>,
     "get" | "put"
   >;
+  /**
+   * Required whenever lifecycleDefinitions is configured. Lifecycle-governed
+   * certifications write only this envelope; they must never dual-write V1.
+   */
+  readonly certifiedEvidenceV2?: Pick<
+    ImmutableRepositoryPort<CertifiedSnapshotEvidenceRecordV2>,
+    "get" | "put"
+  >;
   /** Locks certification time and immutable request identity before artifact materialization. */
   readonly attempts: SnapshotCertificationAttemptStoreV1;
   /** Optional crash-safe handoff record binding the normalized artifact to the immutable attempt. */
@@ -370,7 +379,7 @@ export interface ModernSnapshotCertificationServiceDependencies {
 
 export interface ModernSnapshotCertificationResultV1 {
   readonly evidence: CertifiedSnapshotEvidenceRecordV1;
-  /** Present only for lifecycle-governed production certification until V2 repository persistence ships. */
+  /** Present for lifecycle-governed certification and persisted as the primary immutable evidence record. */
   readonly evidenceV2?: CertifiedSnapshotEvidenceRecordV2;
   readonly replayed: boolean;
 }
@@ -436,14 +445,22 @@ export class ModernSnapshotCertificationService {
     this.#validateReceipt(receipt, snapshot);
 
     const attempt = await this.#attempt(request, actor, snapshot);
-    const existing = await this.#dependencies.certifiedEvidence.get(
-      actor.tenantId,
-      request.certificationManifestId
-    );
     const lifecycleDefinitions = this.#dependencies.lifecycleDefinitions;
-    // Legacy replay deliberately avoids consulting mutable live authority. A
-    // lifecycle-governed replay must instead reconstruct its V2 envelope from
-    // decision-time durable lineage below.
+    const lifecycleEvidence = lifecycleDefinitions === undefined
+      ? undefined
+      : requiredLifecycleEvidence(this.#dependencies.certifiedEvidenceV2);
+    const existing = lifecycleDefinitions === undefined
+      ? await this.#dependencies.certifiedEvidence.get(actor.tenantId, request.certificationManifestId)
+      : undefined;
+    const existingV2 = lifecycleDefinitions === undefined
+      ? undefined
+      : await requiredLifecycleEvidence(lifecycleEvidence).get(
+          actor.tenantId,
+          request.certificationManifestId
+        );
+    // Legacy replay deliberately avoids consulting mutable live authority.
+    // Lifecycle replay instead reloads the exact V2 envelope after its
+    // decision-time definition resolution below.
     if (existing && lifecycleDefinitions === undefined) {
       return this.#replay(request, actor, snapshot, attempt, existing);
     }
@@ -485,9 +502,16 @@ export class ModernSnapshotCertificationService {
     }
     if (!resolutionValue) fail("NOT_FOUND", "No governed certification definition set was found");
     const resolution = this.#validateResolution(resolutionValue, snapshot, certifiedAt);
+    if (existingV2) {
+      if (lifecycle === undefined) {
+        fail("INTEGRITY_FAILURE", "Lifecycle evidence was found without lifecycle authority provenance");
+      }
+      this.#assertEvidenceV2MatchesResolution(existingV2, resolution, attempt, lifecycle.governance);
+      return this.#replayV2(request, actor, snapshot, attempt, existingV2, lifecycle.governance);
+    }
     if (existing) {
       this.#assertEvidenceMatchesResolution(existing, resolution);
-      return this.#replay(request, actor, snapshot, attempt, existing, lifecycle);
+      return this.#replay(request, actor, snapshot, attempt, existing);
     }
     this.#requireSections(snapshot, [
       resolution.dataQuality.mappingSectionId,
@@ -678,6 +702,62 @@ export class ModernSnapshotCertificationService {
     const evidenceV2 = lifecycle === undefined
       ? undefined
       : this.#buildEvidenceV2(evidence, attempt, lifecycle.governance);
+    if (evidenceV2 !== undefined) {
+      const evidenceRepository = requiredLifecycleEvidence(lifecycleEvidence);
+      try {
+        const put = await evidenceRepository.put(evidenceV2, {
+          tenantId: actor.tenantId,
+          actorId: actor.actorId,
+          idempotencyKey: request.idempotencyKey
+        });
+        const persisted = certificationEvidence(
+          () => parseCertifiedSnapshotEvidenceRecordV2(put.record),
+          "Persisted lifecycle certification evidence"
+        );
+        if (canonicalJson(persisted) !== canonicalJson(evidenceV2)) {
+          if (put.replayed) {
+            this.#assertEvidenceV2MatchesResolution(persisted, resolution, attempt, lifecycle!.governance);
+            return this.#replayV2(request, actor, snapshot, attempt, persisted, lifecycle!.governance);
+          }
+          fail("INTEGRITY_FAILURE", "Lifecycle evidence repository returned a substituted record");
+        }
+        await this.#recordArtifactStageCommit({
+          request,
+          actor,
+          attempt,
+          artifactMetadata,
+          artifactBindingHash,
+          certificationEvidenceHash: persisted.evidenceHash,
+          occurredAt: certifiedAt
+        });
+        return Object.freeze({
+          evidence: persisted.v1Evidence,
+          evidenceV2: persisted,
+          replayed: put.replayed
+        });
+      } catch (error) {
+        if (
+          error instanceof RepositoryError &&
+          (error.code === "ALREADY_EXISTS" || error.code === "IDEMPOTENCY_CONFLICT")
+        ) {
+          const raced = await evidenceRepository.get(actor.tenantId, request.certificationManifestId);
+          if (raced) {
+            this.#assertEvidenceV2MatchesResolution(raced, resolution, attempt, lifecycle!.governance);
+            return this.#replayV2(request, actor, snapshot, attempt, raced, lifecycle!.governance);
+          }
+        }
+        await this.#recordArtifactStageFailure({
+          request,
+          actor,
+          attempt,
+          artifactMetadata,
+          artifactBindingHash,
+          occurredAt: certifiedAt,
+          error
+        });
+        throw error;
+      }
+    }
     try {
       const put = await this.#dependencies.certifiedEvidence.put(evidence, {
         tenantId: actor.tenantId,
@@ -698,14 +778,10 @@ export class ModernSnapshotCertificationService {
         attempt,
         artifactMetadata,
         artifactBindingHash,
-        evidence: persisted,
+        certificationEvidenceHash: persisted.evidenceHash,
         occurredAt: certifiedAt
       });
-      return Object.freeze({
-        evidence: persisted,
-        ...(evidenceV2 === undefined ? {} : { evidenceV2 }),
-        replayed: put.replayed
-      });
+      return Object.freeze({ evidence: persisted, replayed: put.replayed });
     } catch (error) {
       if (
         error instanceof RepositoryError &&
@@ -717,7 +793,7 @@ export class ModernSnapshotCertificationService {
         );
         if (raced) {
           this.#assertEvidenceMatchesResolution(raced, resolution);
-          return this.#replay(request, actor, snapshot, attempt, raced, lifecycle);
+          return this.#replay(request, actor, snapshot, attempt, raced);
         }
       }
       await this.#recordArtifactStageFailure({
@@ -738,10 +814,41 @@ export class ModernSnapshotCertificationService {
     actor: TrustedCertificationActorV1,
     snapshot: DatasetSnapshotV2,
     attempt: SnapshotCertificationAttemptV1,
-    existingValue: CertifiedSnapshotEvidenceRecordV1,
-    lifecycle?: LifecycleSnapshotCertificationResolutionV1
+    existingValue: CertifiedSnapshotEvidenceRecordV1
   ): Promise<ModernSnapshotCertificationResultV1> {
     const evidence = parseCertifiedSnapshotEvidenceRecordV1(existingValue);
+    return this.#replayEvidence(request, actor, snapshot, attempt, evidence, evidence.evidenceHash);
+  }
+
+  async #replayV2(
+    request: ResolvedCertifySnapshotV2Request,
+    actor: TrustedCertificationActorV1,
+    snapshot: DatasetSnapshotV2,
+    attempt: SnapshotCertificationAttemptV1,
+    existingValue: CertifiedSnapshotEvidenceRecordV2,
+    governance: CertifiedSnapshotEvidenceRecordV2["governance"]
+  ): Promise<ModernSnapshotCertificationResultV1> {
+    const evidenceV2 = parseCertifiedSnapshotEvidenceRecordV2(existingValue);
+    this.#assertEvidenceV2MatchesResolution(evidenceV2, undefined, attempt, governance);
+    const replay = await this.#replayEvidence(
+      request,
+      actor,
+      snapshot,
+      attempt,
+      evidenceV2.v1Evidence,
+      evidenceV2.evidenceHash
+    );
+    return Object.freeze({ evidence: replay.evidence, evidenceV2, replayed: true });
+  }
+
+  async #replayEvidence(
+    request: ResolvedCertifySnapshotV2Request,
+    actor: TrustedCertificationActorV1,
+    snapshot: DatasetSnapshotV2,
+    attempt: SnapshotCertificationAttemptV1,
+    evidence: CertifiedSnapshotEvidenceRecordV1,
+    certificationEvidenceHash: Sha256Hash
+  ): Promise<ModernSnapshotCertificationResultV1> {
     if (
       evidence.tenantId !== actor.tenantId ||
       evidence.certification.certificationManifestId !== request.certificationManifestId ||
@@ -772,16 +879,10 @@ export class ModernSnapshotCertificationService {
       attempt,
       artifactMetadata: metadata,
       artifactBindingHash,
-      evidence,
+      certificationEvidenceHash,
       occurredAt: attempt.certifiedAt
     });
-    return Object.freeze({
-      evidence,
-      ...(lifecycle === undefined
-        ? {}
-        : { evidenceV2: this.#buildEvidenceV2(evidence, attempt, lifecycle.governance) }),
-      replayed: true
-    });
+    return Object.freeze({ evidence, replayed: true });
   }
 
   async #legacyDefinitionResolution(input: {
@@ -849,7 +950,8 @@ export class ModernSnapshotCertificationService {
     readonly attempt: SnapshotCertificationAttemptV1;
     readonly artifactMetadata: CertifiedSnapshotArtifactMetadataV1;
     readonly artifactBindingHash: Sha256Hash | undefined;
-    readonly evidence: CertifiedSnapshotEvidenceRecordV1;
+    /** Exact primary immutable evidence hash: V1 for legacy, V2 for lifecycle. */
+    readonly certificationEvidenceHash: Sha256Hash;
     readonly occurredAt: string;
   }): Promise<void> {
     const staging = this.#dependencies.artifactStaging;
@@ -863,7 +965,7 @@ export class ModernSnapshotCertificationService {
         certificationManifestId: input.request.certificationManifestId,
         attemptHash: input.attempt.attemptHash,
         artifactBindingHash: input.artifactBindingHash,
-        certificationEvidenceHash: input.evidence.evidenceHash,
+        certificationEvidenceHash: input.certificationEvidenceHash,
         occurredAt: input.occurredAt
       });
       this.#assertArtifactStage(
@@ -873,7 +975,7 @@ export class ModernSnapshotCertificationService {
         input.attempt,
         input.artifactMetadata,
         input.artifactBindingHash,
-        input.evidence.evidenceHash
+        input.certificationEvidenceHash
       );
     } catch (error) {
       if (error instanceof ModernSnapshotCertificationError) throw error;
@@ -1276,6 +1378,25 @@ export class ModernSnapshotCertificationService {
     }
   }
 
+  #assertEvidenceV2MatchesResolution(
+    evidenceValue: CertifiedSnapshotEvidenceRecordV2,
+    resolution: ModernCertificationDefinitionResolutionV1 | undefined,
+    attempt: SnapshotCertificationAttemptV1,
+    governance: CertifiedSnapshotEvidenceRecordV2["governance"]
+  ): void {
+    const evidence = parseCertifiedSnapshotEvidenceRecordV2(evidenceValue);
+    if (
+      canonicalJson(evidence.certificationAttempt) !== canonicalJson(attempt) ||
+      canonicalJson(evidence.governance) !== canonicalJson(governance)
+    ) {
+      fail(
+        "INTEGRITY_FAILURE",
+        "Persisted lifecycle certification evidence does not match the immutable attempt and decision-time governance"
+      );
+    }
+    if (resolution !== undefined) this.#assertEvidenceMatchesResolution(evidence.v1Evidence, resolution);
+  }
+
   #buildEvidenceV2(
     evidence: CertifiedSnapshotEvidenceRecordV1,
     attempt: SnapshotCertificationAttemptV1,
@@ -1434,6 +1555,18 @@ function certificationEvidence<T>(load: () => T, label: string): T {
   } catch {
     fail("INTEGRITY_FAILURE", `${label} failed canonical integrity validation`);
   }
+}
+
+function requiredLifecycleEvidence(
+  evidence: ModernSnapshotCertificationServiceDependencies["certifiedEvidenceV2"]
+): Pick<ImmutableRepositoryPort<CertifiedSnapshotEvidenceRecordV2>, "get" | "put"> {
+  if (evidence === undefined) {
+    fail(
+      "INTEGRITY_FAILURE",
+      "Lifecycle-governed certification requires its dedicated immutable V2 evidence repository"
+    );
+  }
+  return evidence;
 }
 
 function normalizedEvaluationRecords(

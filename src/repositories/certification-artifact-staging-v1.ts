@@ -136,7 +136,7 @@ export interface RecordCertificationEvidenceCommittedV1 {
   readonly certificationManifestId: string;
   readonly attemptHash: string;
   readonly artifactBindingHash: string;
-  /** Hash of the immutable CertifiedSnapshotEvidenceRecordV1 that consumed this exact staged pointer. */
+  /** Hash of the immutable primary certification evidence record that consumed this exact staged pointer. */
   readonly certificationEvidenceHash: string;
   readonly occurredAt: string;
 }
