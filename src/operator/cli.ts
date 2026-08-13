@@ -8,6 +8,7 @@ import { OperatorInputError } from "./schemas.js";
 export const OPERATOR_COMMANDS = [
   "ingest-file",
   "extract-sql",
+  "extract-sql-v2",
   "mapping-propose",
   "mapping-transition",
   "definition-propose",
@@ -19,6 +20,7 @@ export const OPERATOR_COMMANDS = [
   "definition-v2-select-effective",
   "definition-v2-audit-list",
   "certify-snapshot",
+  "certify-snapshot-v2",
   "put-input-artifact",
   "input-certification-propose",
   "input-certification-certify",
@@ -36,7 +38,9 @@ type OperatorControlPlanePort = Pick<
   OperatorControlPlane,
   | "approveMembership"
   | "certifySnapshot"
+  | "certifySnapshotV2"
   | "extractSqlSnapshot"
+  | "extractSqlSnapshotV2"
   | "getGovernedDefinitionV2"
   | "ingestLoanTape"
   | "listAlerts"
@@ -144,6 +148,8 @@ async function executeCommand(
       return controlPlane.ingestLoanTape(request);
     case "extract-sql":
       return controlPlane.extractSqlSnapshot(request, signal === undefined ? {} : { signal });
+    case "extract-sql-v2":
+      return controlPlane.extractSqlSnapshotV2(request, signal === undefined ? {} : { signal });
     case "mapping-propose":
       return controlPlane.proposeMapping(request);
     case "mapping-transition":
@@ -166,6 +172,8 @@ async function executeCommand(
       return controlPlane.listGovernedDefinitionV2Audit(request);
     case "certify-snapshot":
       return controlPlane.certifySnapshot(request);
+    case "certify-snapshot-v2":
+      return controlPlane.certifySnapshotV2(request);
     case "put-input-artifact":
       return controlPlane.putInputArtifact(request);
     case "input-certification-propose":
@@ -193,6 +201,7 @@ const KNOWN_EXTERNAL_ERROR_CODES = new Set([
   "ARTIFACT_TOO_LARGE",
   "BYTE_LIMIT_EXCEEDED",
   "CANCELLED",
+  "CAPABILITY_NOT_CONFIGURED",
   "COLUMN_NOT_ALLOWED",
   "CONFLICT",
   "DEFINITION_INVALID",
@@ -250,6 +259,7 @@ function publicMessage(code: string): string {
   if (code === "MAKER_CHECKER_VIOLATION") return "Maker/checker separation rejected the operation";
   if (code === "IDEMPOTENCY_CONFLICT") return "Idempotency key conflicts with an earlier request";
   if (code === "SOURCE_NOT_CONFIGURED") return "Trusted SQL source is not configured";
+  if (code === "CAPABILITY_NOT_CONFIGURED") return "Governed operator capability is not configured";
   if (code === "MAPPING_NOT_READY") return "Mapping did not pass deterministic validation";
   if (code === "DEFINITION_NOT_EFFECTIVE") return "Required governed definition is not effective";
   if (code === "SNAPSHOT_NOT_FOUND" || code === "NOT_FOUND" || code === "ALERT_NOT_FOUND") {

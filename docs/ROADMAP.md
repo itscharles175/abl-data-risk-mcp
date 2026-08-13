@@ -157,7 +157,7 @@ Do not collapse progress into one opaque score. Track:
 | Production source | PostgreSQL only if the selected client environment supports real certification | Before production claim |
 | Deployment model | Client VPC or tightly controlled hybrid is the conservative first posture | Before IdP/TLS/storage design |
 | Detail access | Aggregate-only remains the MCP default | Before threat-model approval |
-| Currency | Single-currency pilot unless an approved replayable FX definition exists | Before certification |
+| Currency | FX contracts are implemented, but execution remains single-currency until a durable maker/checker FX authority, certified rate repository, effective selector, and conversion replay are composed | Before certification |
 | Notification channel | Choose only after recipient ownership, minimization, retention, and delivery audit are approved | Before recurring monitoring |
 
 ## Definition of success

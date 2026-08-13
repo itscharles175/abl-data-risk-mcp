@@ -29,6 +29,7 @@ import {
   SqliteSurveillanceEvidenceRepositories
 } from "../src/repositories/sqlite-surveillance.js";
 import { RepositoryError } from "../src/repositories/ports.js";
+import { createGovernedSnapshotCommitLineageV1 } from "../src/repositories/governed-snapshot-commit.js";
 
 const directories: string[] = [];
 const HASH = (label: string): Sha256Hash => canonicalHash(label);
@@ -198,6 +199,88 @@ test("correction lineage requires an exact contiguous, non-forking predecessor",
   repository.close();
 });
 
+test("governed capture CAS scopes originals by facility population and permits one concurrent child", async () => {
+  const path = databasePath();
+  const firstConnection = new SqliteDatasetSnapshotV2Repository(path);
+  const secondConnection = new SqliteDatasetSnapshotV2Repository(path);
+  const original = snapshot("governed-original", "2026-07-31");
+  await firstConnection.commitGovernedCapture(
+    original,
+    governedLineage(original, "dataset-a", "facility-a", "binding-a", "delivery-original"),
+    context("governed-original")
+  );
+
+  const otherFacility = snapshot("governed-other-facility", original.asOfDate);
+  await secondConnection.commitGovernedCapture(
+    otherFacility,
+    governedLineage(
+      otherFacility,
+      "dataset-b",
+      "facility-b",
+      "binding-b",
+      "delivery-other-facility"
+    ),
+    context("governed-other-facility")
+  );
+
+  const duplicatePopulation = snapshot("governed-duplicate", original.asOfDate);
+  await assert.rejects(
+    secondConnection.commitGovernedCapture(
+      duplicatePopulation,
+      governedLineage(
+        duplicatePopulation,
+        "dataset-a",
+        "facility-a",
+        "binding-a",
+        "delivery-duplicate"
+      ),
+      context("governed-duplicate")
+    ),
+    (error: unknown) => repositoryCode(error, "ALREADY_EXISTS")
+  );
+
+  const correctionInput = {
+    kind: "correction" as const,
+    correctsSnapshotId: original.snapshotId,
+    correctsSnapshotHash: original.snapshotHash,
+    correctionSequence: 1,
+    reasonCode: "restatement",
+    reason: "Source restatement",
+    detectedAt: "2026-08-02T00:00:00.000Z"
+  };
+  const correctionA = snapshot(
+    "governed-correction-a",
+    original.asOfDate,
+    correctionInput,
+    "2026-08-02T01:00:00.000Z"
+  );
+  const correctionB = snapshot(
+    "governed-correction-b",
+    original.asOfDate,
+    correctionInput,
+    "2026-08-02T01:01:00.000Z"
+  );
+  const results = await Promise.allSettled([
+    firstConnection.commitGovernedCapture(
+      correctionA,
+      governedLineage(correctionA, "dataset-a", "facility-a", "binding-a", "delivery-correction-a"),
+      context("governed-correction-a")
+    ),
+    secondConnection.commitGovernedCapture(
+      correctionB,
+      governedLineage(correctionB, "dataset-a", "facility-a", "binding-a", "delivery-correction-b"),
+      context("governed-correction-b")
+    )
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  const rejected = results.find((result) => result.status === "rejected");
+  assert.ok(rejected?.status === "rejected");
+  assert.equal((rejected.reason as RepositoryError).code, "CONCURRENCY_CONFLICT");
+
+  firstConnection.close();
+  secondConnection.close();
+});
+
 test("certified evidence requires the persisted tenant snapshot and exact ArtifactStore metadata", async () => {
   const path = databasePath();
   const snapshots = new SqliteDatasetSnapshotV2Repository(path);
@@ -355,6 +438,41 @@ function snapshot(
     }],
     correction,
     createdBy: "snapshot-worker"
+  });
+}
+
+function governedLineage(
+  snapshotValue: DatasetSnapshotV2,
+  datasetId: string,
+  facilityId: string,
+  bindingId: string,
+  deliveryId: string
+) {
+  return createGovernedSnapshotCommitLineageV1({
+    contractVersion: 1,
+    tenantId: snapshotValue.tenantId,
+    snapshotId: snapshotValue.snapshotId,
+    snapshotHash: snapshotValue.snapshotHash,
+    datasetId,
+    facilityId,
+    sourceContract: snapshotValue.sourceContract,
+    scopeBinding: {
+      bindingId,
+      revision: 1,
+      bindingHash: HASH(`binding:${bindingId}`)
+    },
+    sourceDelivery: {
+      deliveryId,
+      deliveryRevision: 1,
+      deliveryHash: HASH(`delivery:${deliveryId}`),
+      locatorHash: HASH(`locator:${deliveryId}`),
+      sourceVersionHash: HASH(`source-version:${deliveryId}`)
+    },
+    extractionReceipt: {
+      receiptId: `${snapshotValue.snapshotId}:extraction`,
+      receiptHash: snapshotValue.hashes.extractionHash
+    },
+    asOfDate: snapshotValue.asOfDate
   });
 }
 

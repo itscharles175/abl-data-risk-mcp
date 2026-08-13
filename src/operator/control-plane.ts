@@ -43,6 +43,14 @@ import type { SnapshotIngestionService } from "../services/ingestion.js";
 import type { SqlSnapshotExtractionService } from "../services/sql-snapshot-extraction.js";
 import type { InputCertificationService } from "../services/input-certification.js";
 import type {
+  ModernSnapshotCaptureResultV1,
+  TrustedModernSnapshotCaptureActorV1
+} from "../services/modern-snapshot-capture.js";
+import type {
+  ModernSnapshotCertificationResultV1,
+  TrustedCertificationActorV1
+} from "../services/modern-snapshot-certification.js";
+import type {
   GovernedDefinitionV2Resolver,
   GovernedDefinitionExecutionReferenceV2
 } from "../services/governed-definition-v2-resolver.js";
@@ -51,6 +59,7 @@ import {
   alertTransitionInputSchema,
   auditListInputSchema,
   boundedJson,
+  certifySnapshotV2InputSchema,
   certifySnapshotInputSchema,
   definitionProposeInputSchema,
   definitionTransitionInputSchema,
@@ -69,6 +78,7 @@ import {
   OperatorInputError,
   parseStrict,
   putInputArtifactInputSchema,
+  extractSqlV2InputSchema,
   inputCertificationCertifySchema,
   inputCertificationProposeSchema,
   sqlExtractInputSchema,
@@ -78,9 +88,11 @@ import {
   type AlertTransitionInput,
   type AuditListInput,
   type CertifySnapshotInput,
+  type CertifySnapshotV2Input,
   type DefinitionProposeInput,
   type DefinitionTransitionInput,
   type FileIngestInput,
+  type ExtractSqlV2Input,
   type GovernedDefinitionV2AuditListInput,
   type GovernedDefinitionV2GetInput,
   type GovernedDefinitionV2ListInput,
@@ -120,6 +132,19 @@ type AlertPort = Pick<MonitoringAlertStore, "listAlerts" | "listAuditEvents" | "
 type IngestionPort = Pick<SnapshotIngestionService, "certifyMappedSnapshot" | "registerDeliveredSnapshot">;
 type SqlExtractorPort = Pick<SqlSnapshotExtractionService, "extractAndRegister">;
 type InputCertificationPort = Pick<InputCertificationService, "propose" | "certify">;
+type ModernSnapshotCapturePort = {
+  capture(
+    actor: TrustedModernSnapshotCaptureActorV1,
+    request: ExtractSqlV2Input,
+    options?: { readonly signal?: AbortSignal }
+  ): Promise<ModernSnapshotCaptureResultV1>;
+};
+type ModernSnapshotCertificationPort = {
+  certify(
+    request: CertifySnapshotV2Input,
+    actor: TrustedCertificationActorV1
+  ): Promise<ModernSnapshotCertificationResultV1>;
+};
 
 export interface OperatorControlPlaneDependencies {
   /**
@@ -137,6 +162,8 @@ export interface OperatorControlPlaneDependencies {
   readonly ingestion: IngestionPort;
   readonly inputCertification?: InputCertificationPort;
   readonly sqlExtractors?: ReadonlyMap<string, SqlExtractorPort>;
+  readonly modernSnapshotCapture?: ModernSnapshotCapturePort;
+  readonly modernSnapshotCertification?: ModernSnapshotCertificationPort;
   readonly loadLoanTape?: typeof loadLoanTapeFile;
   readonly readJsonFile?: typeof readBoundedJsonFile;
 }
@@ -144,18 +171,22 @@ export interface OperatorControlPlaneDependencies {
 /**
  * Authenticated identity for an operator process or service. The current local
  * CLI is intentionally a privileged global administrator: tenantId values in
- * request documents select resources and are not authentication assertions.
- * A networked administration service must enforce its tenant grants before it
- * constructs or invokes this control plane.
+ * legacy request documents select resources and are not authentication
+ * assertions. Modern IDs-only commands instead require the process boundary to
+ * bind tenantId on this trusted principal. A networked administration service
+ * must enforce its tenant grants before it constructs or invokes this plane.
  */
 export interface OperatorPrincipal {
   readonly principalId: string;
+  /** Optional server-derived tenant binding required by modern IDs-only commands. */
+  readonly tenantId?: string;
   readonly authenticationMethod: "local_os_account" | "trusted_service_identity";
   readonly authorizationScope: "global_admin";
 }
 
 export type OperatorControlPlaneErrorCode =
   | "INVALID_INPUT"
+  | "CAPABILITY_NOT_CONFIGURED"
   | "SOURCE_NOT_CONFIGURED"
   | "MAPPING_NOT_READY"
   | "DEFINITION_INVALID"
@@ -187,6 +218,38 @@ export interface OperatorSqlSnapshotSummary extends OperatorSnapshotSummary {
   readonly relationId: string;
   readonly queryFingerprint: string;
   readonly byteLength: number;
+}
+
+export interface OperatorModernSnapshotCaptureSummary {
+  readonly snapshotId: string;
+  readonly deliveryId: string;
+  readonly sourceContractId: string;
+  readonly receiptId: string;
+  readonly snapshotHash: string;
+  readonly receiptHash: string;
+  readonly asOfDate: string;
+  readonly rowCount: number;
+  readonly columnCount: number;
+  readonly byteCount: number;
+  readonly receiptReplayed: boolean;
+  readonly snapshotReplayed: boolean;
+}
+
+export interface OperatorModernSnapshotCertificationSummary {
+  readonly snapshotId: string;
+  readonly snapshotHash: string;
+  readonly mappingApplicationId: string;
+  readonly mappingApplicationHash: string;
+  readonly normalizedPopulationId: string;
+  readonly populationHash: string;
+  readonly certificationManifestId: string;
+  readonly certificationManifestHash: string;
+  readonly dataQualityResultHash: string;
+  readonly reconciliationResultHash: string;
+  readonly evidenceHash: string;
+  readonly rowCount: number;
+  readonly certifiedAt: string;
+  readonly replayed: boolean;
 }
 
 export interface OperatorMappingSummary {
@@ -431,6 +494,49 @@ export class OperatorControlPlane {
       relationId: result.extraction.relationId,
       queryFingerprint: result.extraction.queryFingerprint,
       byteLength: result.extraction.byteLength
+    };
+  }
+
+  async extractSqlSnapshotV2(
+    inputValue: unknown,
+    options: { readonly signal?: AbortSignal } = {}
+  ): Promise<OperatorModernSnapshotCaptureSummary> {
+    const input: ExtractSqlV2Input = parseStrict(
+      extractSqlV2InputSchema,
+      inputValue,
+      "modern SQL extraction request"
+    );
+    const capture = this.#dependencies.modernSnapshotCapture;
+    const tenantId = this.#principal.tenantId;
+    if (capture === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed modern snapshot capture is not configured"
+      );
+    }
+    const result = await capture.capture(
+      {
+        tenantId,
+        actorId: this.#principal.principalId,
+        authority: "platform_operator",
+        identitySource: "server_derived"
+      },
+      input,
+      options.signal === undefined ? {} : { signal: options.signal }
+    );
+    return {
+      snapshotId: result.snapshot.snapshotId,
+      deliveryId: result.receipt.deliveryId,
+      sourceContractId: result.snapshot.sourceContract.sourceContractId,
+      receiptId: result.receipt.receiptId,
+      snapshotHash: result.snapshot.snapshotHash,
+      receiptHash: result.receipt.receiptHash,
+      asOfDate: result.snapshot.asOfDate,
+      rowCount: result.snapshot.rowCount,
+      columnCount: result.receipt.columnCount,
+      byteCount: result.receipt.byteCount,
+      receiptReplayed: result.receiptReplayed,
+      snapshotReplayed: result.snapshotReplayed
     };
   }
 
@@ -732,6 +838,46 @@ export class OperatorControlPlane {
     };
   }
 
+  async certifySnapshotV2(
+    inputValue: unknown
+  ): Promise<OperatorModernSnapshotCertificationSummary> {
+    const input: CertifySnapshotV2Input = parseStrict(
+      certifySnapshotV2InputSchema,
+      inputValue,
+      "modern snapshot certification request"
+    );
+    const certification = this.#dependencies.modernSnapshotCertification;
+    const tenantId = this.#principal.tenantId;
+    if (certification === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed modern snapshot certification is not configured"
+      );
+    }
+    const result = await certification.certify(input, {
+      tenantId,
+      actorId: this.#principal.principalId,
+      authority: "platform_operator",
+      identitySource: "server_derived"
+    });
+    return {
+      snapshotId: result.evidence.certification.snapshotId,
+      snapshotHash: result.evidence.certification.snapshotHash,
+      mappingApplicationId: result.evidence.certification.mappingApplicationId,
+      mappingApplicationHash: result.evidence.certification.mappingApplicationHash,
+      normalizedPopulationId: result.evidence.certification.populationId,
+      populationHash: result.evidence.certification.populationHash,
+      certificationManifestId: result.evidence.certification.certificationManifestId,
+      certificationManifestHash: result.evidence.certification.certificationManifestHash,
+      dataQualityResultHash: result.evidence.certification.dataQualityResultHash,
+      reconciliationResultHash: result.evidence.certification.reconciliationResultHash,
+      evidenceHash: result.evidence.evidenceHash,
+      rowCount: result.evidence.certification.rowCount,
+      certifiedAt: result.evidence.certification.certifiedAt,
+      replayed: result.replayed
+    };
+  }
+
   putInputArtifact(inputValue: unknown): OperatorInputArtifactSummary {
     const input = parseStrict(putInputArtifactInputSchema, inputValue, "input artifact request");
     const value = validateInputArtifact(input.kind, this.#readJsonFile(input.filePath, 8_000_000));
@@ -944,6 +1090,9 @@ function validateOperatorPrincipal(principal: OperatorPrincipal): OperatorPrinci
     principal?.principalId,
     "operator principal"
   );
+  const tenantId = principal.tenantId === undefined
+    ? undefined
+    : parseStrict(operatorIdentifierSchema, principal.tenantId, "operator tenant binding");
   if (
     (principal.authenticationMethod !== "local_os_account" &&
       principal.authenticationMethod !== "trusted_service_identity") ||
@@ -953,6 +1102,7 @@ function validateOperatorPrincipal(principal: OperatorPrincipal): OperatorPrinci
   }
   return Object.freeze({
     principalId,
+    ...(tenantId === undefined ? {} : { tenantId }),
     authenticationMethod: principal.authenticationMethod,
     authorizationScope: principal.authorizationScope
   });

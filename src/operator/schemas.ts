@@ -86,6 +86,17 @@ export const sqlExtractInputSchema = z
   })
   .strict();
 
+/**
+ * Trusted modern capture accepts identity references only. Source location,
+ * SQL, credentials, limits, hashes and actor identity are runtime authority.
+ */
+export const extractSqlV2InputSchema = z
+  .object({
+    sourceContractId: operatorIdentifierSchema,
+    deliveryId: operatorIdentifierSchema
+  })
+  .strict();
+
 export const mappingProposeInputSchema = z
   .object({
     tenantId: operatorIdentifierSchema,
@@ -239,6 +250,16 @@ export const certifySnapshotInputSchema = z
     evaluatedAt: isoDateTimeSchema,
     codeVersion: operatorIdentifierSchema,
     idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+/**
+ * Trusted modern certification reloads every definition and evidence payload
+ * by immutable identifier; callers cannot submit rows, totals or actor data.
+ */
+export const certifySnapshotV2InputSchema = z
+  .object({
+    snapshotId: operatorIdentifierSchema
   })
   .strict();
 
@@ -593,6 +614,7 @@ const monitoringInputSchema = z
 
 export type FileIngestInput = z.infer<typeof fileIngestInputSchema>;
 export type SqlExtractInput = z.infer<typeof sqlExtractInputSchema>;
+export type ExtractSqlV2Input = z.infer<typeof extractSqlV2InputSchema>;
 export type MappingProposeInput = z.infer<typeof mappingProposeInputSchema>;
 export type MappingTransitionInput = z.infer<typeof mappingTransitionInputSchema>;
 export type DefinitionProposeInput = z.infer<typeof definitionProposeInputSchema>;
@@ -608,6 +630,7 @@ export type GovernedDefinitionV2AuditListInput = z.infer<
   typeof governedDefinitionV2AuditListInputSchema
 >;
 export type CertifySnapshotInput = z.infer<typeof certifySnapshotInputSchema>;
+export type CertifySnapshotV2Input = z.infer<typeof certifySnapshotV2InputSchema>;
 export type PutInputArtifactInput = z.infer<typeof putInputArtifactInputSchema>;
 export type InputCertificationProposeRequest = z.infer<typeof inputCertificationProposeSchema>;
 export type InputCertificationCertifyRequest = z.infer<typeof inputCertificationCertifySchema>;
