@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   IdentifierSchema,
+  Sha256HashSchema,
   canonicalHash,
   canonicalJson,
   parseDatasetSnapshotV2,
@@ -16,6 +17,7 @@ import {
 } from "../contracts/certified-snapshot-evidence-v1.js";
 import {
   parseGovernedSnapshotCommitLineageV1,
+  type DatasetSnapshotCorrectionReadPortV1,
   type GovernedDatasetSnapshotCommitRepositoryV1,
   type GovernedSnapshotCaptureLineageReadPortV1,
   type GovernedSnapshotCommitLineageV1
@@ -555,7 +557,10 @@ abstract class SqliteImmutableSurveillanceRepository<T extends TenantRecord>
 
 export class SqliteDatasetSnapshotV2Repository
   extends SqliteImmutableSurveillanceRepository<DatasetSnapshotV2>
-  implements GovernedDatasetSnapshotCommitRepositoryV1, GovernedSnapshotCaptureLineageReadPortV1
+  implements
+    GovernedDatasetSnapshotCommitRepositoryV1,
+    GovernedSnapshotCaptureLineageReadPortV1,
+    DatasetSnapshotCorrectionReadPortV1
 {
   constructor(databasePath: string, options: SqliteSurveillanceRepositoryOptions = {}) {
     super(databasePath, datasetSnapshotConfiguration(), options);
@@ -603,6 +608,47 @@ export class SqliteDatasetSnapshotV2Repository
       if (error instanceof RepositoryError) throw error;
       throw integrity("Stored governed snapshot lineage failed integrity verification", error);
     }
+  }
+
+  async getDirectCorrection(
+    tenantIdValue: string,
+    correctsSnapshotIdValue: string,
+    correctsSnapshotHashValue: string
+  ): Promise<DatasetSnapshotV2 | undefined> {
+    const tenantId = identifier(tenantIdValue, "tenant id");
+    const correctsSnapshotId = identifier(correctsSnapshotIdValue, "corrected snapshot id");
+    const parsedHash = Sha256HashSchema.safeParse(correctsSnapshotHashValue);
+    if (!parsedHash.success) {
+      throw new RepositoryError("INVALID_ARGUMENT", "corrected snapshot hash is invalid");
+    }
+    const correctsSnapshotHash = parsedHash.data;
+    const row = this.verifiedReadDatabase()
+      .prepare(
+        `SELECT record_id FROM surveillance_dataset_snapshots_v2
+          WHERE tenant_id = ?
+            AND corrects_snapshot_id = ?
+            AND corrects_snapshot_hash = ?`
+      )
+      .get(tenantId, correctsSnapshotId, correctsSnapshotHash) as
+      | { readonly record_id: string }
+      | undefined;
+    if (!row) return undefined;
+
+    // Reload through the canonical repository read path so indexed successor
+    // columns cannot substitute malformed or cross-tenant record content.
+    const correction = await this.get(tenantId, row.record_id);
+    if (
+      !correction ||
+      correction.correction.kind !== "correction" ||
+      correction.correction.correctsSnapshotId !== correctsSnapshotId ||
+      correction.correction.correctsSnapshotHash !== correctsSnapshotHash
+    ) {
+      throw new RepositoryError(
+        "INTEGRITY_FAILURE",
+        "Direct correction index did not resolve its exact immutable successor"
+      );
+    }
+    return correction;
   }
 }
 

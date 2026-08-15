@@ -31,7 +31,7 @@ import {
 } from "../services/modern-snapshot-capture.js";
 import type {
   ModernCertificationDefinitionResolutionV1
-} from "../services/modern-snapshot-certification.js";
+} from "../services/modern-snapshot-certification-types-v1.js";
 
 /**
  * Decision-time-only extension.  The original certification-definition port

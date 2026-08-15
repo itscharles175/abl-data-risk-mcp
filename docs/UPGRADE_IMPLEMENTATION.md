@@ -1,6 +1,6 @@
 # Portfolio Risk Platform Upgrade — Implementation Status
 
-Status date: 2026-08-13
+Status date: 2026-08-15
 
 This document distinguishes code and deterministic conformance coverage from live-environment certification. “Implemented” means a bounded source contract or engine exists in this repository and is covered by local tests. It does not mean a client database, identity provider, object store, registry, Kubernetes cluster, or disaster-recovery process has been certified or deployed.
 
@@ -12,6 +12,17 @@ This document distinguishes code and deterministic conformance coverage from liv
 | Fixture/conformance | The boundary is exercised through injected fakes or representative fixtures, not a live managed service. |
 | Partially integrated | The component exists but is not wired through every production surface or persistent backend. |
 | External gate | Requires environment authority, infrastructure, credentials, client data, or human approval not held by this repository. |
+
+## Current end-to-end slice
+
+| Surface | Status | Evidence boundary |
+|---|---|---|
+| Single-facility V2 capture → certification → publication → surveillance | Implemented for local composition | Executable vertical acceptance uses local durable stores and synthetic authority; production and remote advertisement are explicitly disabled |
+| Start/status/result/cancel routing | Implemented | Durable route catalog binds opaque handles to the issuing legacy or V4 workflow lane and verified principal |
+| Operator V2 lifecycle commands | Partially integrated | Command/control-plane surfaces cover delivery, historical runtime, capture, certification, publication, disable, retrieval, and audit; trusted modern runtime injection is still required |
+| Browser pilot workflow | Partially integrated | BFF and console support an optional IDs-only pilot port; the default BFF injects no live workflow |
+| Synthetic ABS/auto contract | Fixture/conformance | Exercises mapping, value-state, control, exception, vintage, and unavailable-section semantics without publishing private case-study data |
+| Client-VPC Kubernetes launch | External gate | No live IdP, database/RLS, object/KMS, cluster, restore, signing, canary, or customer approval is claimed |
 
 ## Release-by-release status
 
@@ -25,7 +36,7 @@ Implemented or conformance-backed:
 - an independent immutable governed-definition v2 component with strict semantic versions, semantic diffs and impact previews, maker/checker lifecycle evidence, activated-only historical frozen resolution, fail-closed rollback-target retirement, an append-only non-executable `withdrawn` state for abandoned pending versions, and additive kinds for source/source-access-policy/dataset-scope-binding/mapping/methodology/borrowing-base/metric/projection/cohort/bin/reconciliation/entity/report/scenario/covenant governance;
 - trusted metadata-only `definition-v2-*` operator commands and runtime construction for proposal, transition, get, list, resolver-verified effective selection, and audit; request documents cannot supply actors, and no definition document or transition evidence is returned;
 - correction-aware longitudinal certification bundles that bind one dataset, source contract, governed scope, delivery identity, full replacement chain, dictionary, mapping runtime/compiler, normalized population, and frozen methodology;
-- a pure `portfolio_surveillance_v1` operation module with an IDs-only request, correction-aware source expansion, frozen v2 definition resolution, least-privilege record projection, declared-family compatibility checks, certified field/dimension authorization, aggregate-only result validation, exact byte/cell/population accounting, and explicit v4 job-envelope handoff metadata; the module is not yet registered in the durable worker or MCP runtime;
+- a pure `portfolio_surveillance_v1` operation module with an IDs-only request, correction-aware source expansion, frozen v2 definition resolution, least-privilege record projection, declared-family compatibility checks, certified field/dimension authorization, aggregate-only result validation, exact byte/cell/population accounting, and explicit v4 job-envelope handoff metadata; a production-disabled single-facility composition connects it to the durable V4 workflow for local acceptance;
 - a data-lineage-only certified-snapshot publication contract, IDs-only trusted publication service, and immutable tenant catalog with disable events, exact idempotency, schema attestation, and hash-chained audit; access grants are deliberately governed separately through `SourceAccessPolicyV1` rather than embedded in publication evidence;
 - governed `GovernedDatasetScopeBindingV1` lifecycle documents plus canonical normalized-snapshot and certified-snapshot-evidence contracts; immutable tenant-scoped SQLite repositories durably persist `DatasetSnapshotV2` and modern certification evidence, enforce correction-chain and snapshot/evidence referential integrity, attest their schema, and reject mutation, deletion, drift, and non-exact idempotent replay;
 - an IDs-only modern capture service for PostgreSQL pull and immutable XLSX/Parquet deliveries, with server-derived actors and snapshot identifiers, exact delivery/source/scope receipt lineage, bounded extraction evidence, and an atomic facility-aware snapshot/correction commit; plus a modern certification service that maps, evaluates DQ/reconciliation, reload-verifies encrypted normalized artifacts, and writes certified evidence last under injected authorities;
@@ -49,8 +60,8 @@ Not yet production-certified:
 - migration of an existing customer control plane into the v2 contracts;
 - migration and restore rehearsal for existing customer control planes using the additive v2 definition component and trusted operator commands;
 - durable persistence and runtime composition of longitudinal bundles (the strict builder/verifier exists, but no production repository or job envelope currently owns it);
-- production composition and independent lifecycle authority for the modern capture/certification writers. Local writer services include immutable certification-attempt receipts, encrypted hash-bound captured source-section material with crash/key-rotation recovery, and an append-only prepared-artifact/failure/commit staging ledger that certification verifies on retry; source/scope and DQ/reconciliation registration remain trusted-import foundations. Frozen compiler/methodology execution, durable dimensions, trusted FX provider capture, historical activation-at-use replay, and production runtime composition remain required;
-- environment-backed composition of the publication verifier, metadata preflight, post-policy materializer, v4 state/workflow, job/security/audit stores, and worker; `buildRemoteServer` conditionally supports the fifth start operation only when a dedicated workflow is injected, production `remote-cli` deliberately omits it, and generic status/result/cancel still require a composite opaque-handle router;
+- production composition and independent lifecycle authority for the modern capture/certification writers. The local composition includes immutable extraction/certification-attempt receipts, encrypted hash-bound captured source-section material with crash/key-rotation recovery, and an append-only prepared-artifact/failure/commit staging ledger that certification verifies on retry; source/scope and some DQ/reconciliation registration remain trusted-import foundations. Frozen compiler/methodology execution, durable dimensions, trusted FX provider capture, historical activation-at-use replay, and environment-backed composition remain required;
+- production composition of the publication verifier, metadata preflight, post-policy materializer, v4 state/workflow, job/security/audit stores, and worker. A production-disabled single-facility composition and durable composite opaque-handle router now exist and are exercised locally. `buildRemoteServer` conditionally supports the fifth operation only when the composite workflow is injected; production `remote-cli` deliberately omits it;
 - production implementation of the metric-result-cell authority over signed surveillance artifacts and binding of monitoring-v2 to certified metric-run IDs;
 - an independent production replay of customer certifications after dictionary/mapping upgrades.
 
@@ -60,11 +71,12 @@ Implemented or fixture-backed:
 
 - pnpm workspace with React/TypeScript console, Express BFF, and shared contracts package;
 - six governed roles, permission-filtered navigation, secure-session/CSRF/origin controls, OIDC Authorization Code/PKCE primitives, step-up state, maker/checker enforcement, opaque secret references, source-contract onboarding forms, and fixture review journeys;
+- an optional, tenant/facility-bound BFF pilot port and console journey for IDs-only surveillance start, opaque status/result, and cancellation;
 - mapping-v2 transforms, source/data-quality v2 contracts, materiality fields, semantic hashes, and deterministic validation tests.
 
 Boundary:
 
-- the BFF data adapter and console workbench currently use clearly labeled fixture data; they are not connected to a live control API or portfolio database;
+- the BFF data adapter and console workbench currently use clearly labeled fixture data; the default launcher injects neither a live control API nor the optional pilot job service;
 - production OIDC discovery/token exchange code exists, but a real issuer, client registration, TLS gateway, secure session store, and browser E2E remain external gates;
 - full persistent administration, approval queues, rollback execution, connector/key rotation, and deployment configuration are not yet end-to-end production integrations.
 
@@ -79,7 +91,7 @@ Implemented or conformance-backed:
 
 Boundary:
 
-- the engines are library surfaces with golden fixtures; they are not yet backed by a production longitudinal portfolio or independently signed workbook evidence;
+- the engines and single-facility pilot are backed by synthetic golden/vertical fixtures; they are not backed by a production longitudinal portfolio or independently approved private workbook evidence;
 - not every requested business segmentation or chart is exposed through the console/MCP;
 - correction/restatement bridges and cross-facility resolution require approved live definitions and customer evidence.
 

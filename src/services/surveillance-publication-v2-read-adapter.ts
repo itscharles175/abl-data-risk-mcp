@@ -15,6 +15,7 @@ import type {
 import type { SurveillanceMaterializationPublicationReadPortV1 } from "./surveillance-materializer.js";
 import {
   RepositoryBackedSurveillanceSourcePublicationAuthorityV2,
+  type ResolvedGovernedCertifiedSnapshotPublicationMetadataV2,
   type ResolvedGovernedCertifiedSnapshotPublicationV2
 } from "./surveillance-production-authority-v2.js";
 import type { GovernedCertifiedSnapshotPublicationLinkV2 } from "../contracts/governed-certified-snapshot-publication-link-v2.js";
@@ -49,8 +50,15 @@ export interface GovernedCertifiedSnapshotPublicationLinkCatalogReadPortV2 {
 }
 
 export interface V2SurveillancePublicationReadAdapterDependencies {
-  /** Performs the complete immutable V2 evidence, capture, definition, and artifact verification. */
-  readonly authority: Pick<RepositoryBackedSurveillanceSourcePublicationAuthorityV2, "resolve">;
+  /** Metadata-only verification. It has no normalized artifact read capability. */
+  readonly metadataAuthority: Pick<RepositoryBackedSurveillanceSourcePublicationAuthorityV2, "resolveMetadata">;
+  /** Isolated V2 sidecar; a legacy publication catalog is intentionally not accepted. */
+  readonly publicationLinks: GovernedCertifiedSnapshotPublicationLinkCatalogReadPortV2;
+}
+
+export interface V2SurveillancePublicationMaterializationReadAdapterDependencies {
+  /** Full post-policy verification, including the normalized artifact. */
+  readonly artifactAuthority: Pick<RepositoryBackedSurveillanceSourcePublicationAuthorityV2, "resolveArtifact">;
   /** Isolated V2 sidecar; a legacy publication catalog is intentionally not accepted. */
   readonly publicationLinks: GovernedCertifiedSnapshotPublicationLinkCatalogReadPortV2;
 }
@@ -70,17 +78,18 @@ export class V2SurveillancePublicationReadAdapterError extends Error {
 }
 
 /**
- * Additive compatibility adapter for the existing surveillance preflight and
- * materializer read ports.  It never reads V1 catalog or evidence state:
- * every returned V1-shaped publication is the record embedded in an enabled
- * V2 link *after* RepositoryBackedSurveillanceSourcePublicationAuthorityV2
- * has independently reloaded and verified its governed lineage.
+ * Metadata-only compatibility adapter for the surveillance preflight port.
+ * It never reads V1 catalog or evidence state:
+ * every returned V1-shaped publication is the record embedded in an immutable
+ * V2 link after the V2 authority has independently reloaded and verified its
+ * governed lineage. A later disable remains visible so preflight can evaluate
+ * it against the immutable planning cutoff.
  *
  * This class is deliberately not a publication writer.  It cannot make a V1
  * publication authoritative, nor can it turn a disabled V2 link back on.
  */
 export class V2OnlySurveillancePublicationReadAdapter
-  implements SurveillancePublicationReadPortV1, SurveillanceMaterializationPublicationReadPortV1
+  implements SurveillancePublicationReadPortV1
 {
   readonly #dependencies: V2SurveillancePublicationReadAdapterDependencies;
 
@@ -99,13 +108,13 @@ export class V2OnlySurveillancePublicationReadAdapter
     );
     if (!link) return undefined;
     this.#assertEvidenceSelection(link, tenantId, certificationManifestId);
-    return this.#resolveEnabledLink(tenantId, link);
+    return this.#resolveMetadataLink(tenantId, link);
   }
 
   /**
-   * Materialization receives a V1 publication id from already-authorized
-   * metadata.  The V2 sidecar has no public legacy lookup, so this bounded
-   * scan is fail-closed if the tenant sidecar reaches its maximum result size.
+   * Preflight re-resolves by publication id without payload access. The V2
+   * sidecar has no public legacy lookup, so this bounded scan is fail-closed
+   * if the tenant sidecar reaches its maximum result size.
    */
   async get(tenantId: string, publicationId: string): Promise<CertifiedSnapshotPublicationV1 | undefined> {
     const links = await this.#listBounded(tenantId);
@@ -113,7 +122,7 @@ export class V2OnlySurveillancePublicationReadAdapter
       candidate.tenantId === tenantId && candidate.publication.publicationId === publicationId
     );
     if (!link) return undefined;
-    return this.#resolveEnabledLink(tenantId, link);
+    return this.#resolveMetadataLink(tenantId, link);
   }
 
   /**
@@ -158,7 +167,7 @@ export class V2OnlySurveillancePublicationReadAdapter
     const links = await this.#listBounded(query.tenantId);
     const publications: CertifiedSnapshotPublicationV1[] = [];
     for (const link of links) {
-      const publication = await this.#resolveEnabledLink(query.tenantId, link);
+      const publication = await this.#resolveMetadataLink(query.tenantId, link);
       if (publication && matchesScopeQuery(publication, query)) publications.push(publication);
     }
     const ordered = publications.sort((left, right) =>
@@ -173,19 +182,14 @@ export class V2OnlySurveillancePublicationReadAdapter
     return Object.freeze({ publications: Object.freeze(ordered), complete: true });
   }
 
-  async #resolveEnabledLink(
+  async #resolveMetadataLink(
     tenantId: string,
     selected: GovernedCertifiedSnapshotPublicationLinkV2
   ): Promise<CertifiedSnapshotPublicationV1 | undefined> {
     if (selected.tenantId !== tenantId) {
       integrity("V2 publication-link selector crossed its requested tenant boundary");
     }
-    const enabled = await this.#dependencies.publicationLinks.getEnabled(tenantId, selected.linkId);
-    if (!enabled) return undefined;
-    if (canonicalJson(enabled) !== canonicalJson(selected)) {
-      integrity("V2 publication-link enabled selector substituted immutable link evidence");
-    }
-    const resolved = await this.#dependencies.authority.resolve({ tenantId, linkId: selected.linkId });
+    const resolved = await this.#dependencies.metadataAuthority.resolveMetadata({ tenantId, linkId: selected.linkId });
     if (!resolved) return undefined;
     this.#assertAuthorityResolution(tenantId, selected, resolved);
     try {
@@ -229,7 +233,7 @@ export class V2OnlySurveillancePublicationReadAdapter
   #assertAuthorityResolution(
     tenantId: string,
     selected: GovernedCertifiedSnapshotPublicationLinkV2,
-    resolved: ResolvedGovernedCertifiedSnapshotPublicationV2
+    resolved: ResolvedGovernedCertifiedSnapshotPublicationMetadataV2
   ): void {
     if (
       resolved.link.tenantId !== tenantId ||
@@ -242,6 +246,123 @@ export class V2OnlySurveillancePublicationReadAdapter
     ) {
       integrity("V2 publication authority substituted governed publication, evidence, or snapshot lineage");
     }
+  }
+}
+
+/**
+ * Post-policy materialization adapter. Unlike the preflight adapter, its get
+ * requires the link to be currently enabled and invokes full artifact
+ * verification. Keeping this as a separate object prevents an authorization
+ * read port from accidentally crossing the payload boundary.
+ */
+export class V2OnlySurveillancePublicationMaterializationReadAdapter
+  implements SurveillanceMaterializationPublicationReadPortV1
+{
+  readonly #dependencies: V2SurveillancePublicationMaterializationReadAdapterDependencies;
+
+  constructor(dependencies: V2SurveillancePublicationMaterializationReadAdapterDependencies) {
+    this.#dependencies = dependencies;
+  }
+
+  async get(tenantId: string, publicationId: string): Promise<CertifiedSnapshotPublicationV1 | undefined> {
+    const links = await listBounded(this.#dependencies.publicationLinks, tenantId);
+    const selected = links.find((candidate) =>
+      candidate.tenantId === tenantId && candidate.publication.publicationId === publicationId
+    );
+    if (!selected) return undefined;
+    const enabled = await this.#dependencies.publicationLinks.getEnabled(tenantId, selected.linkId);
+    if (!enabled) return undefined;
+    if (canonicalJson(enabled) !== canonicalJson(selected)) {
+      integrity("V2 publication-link enabled selector substituted immutable link evidence");
+    }
+    const resolved = await this.#dependencies.artifactAuthority.resolveArtifact({
+      tenantId,
+      linkId: selected.linkId
+    });
+    if (!resolved) return undefined;
+    assertAuthorityResolution(tenantId, selected, resolved);
+    return parseEmbeddedPublication(resolved);
+  }
+
+  async getDisable(
+    tenantId: string,
+    publicationId: string
+  ): Promise<SurveillancePublicationDisableEventV1 | undefined> {
+    return projectDisable(this.#dependencies.publicationLinks, tenantId, publicationId);
+  }
+}
+
+async function listBounded(
+  publicationLinks: GovernedCertifiedSnapshotPublicationLinkCatalogReadPortV2,
+  tenantId: string
+): Promise<readonly GovernedCertifiedSnapshotPublicationLinkV2[]> {
+  const links = await publicationLinks.list(tenantId, MAXIMUM_LINKS_PER_TENANT);
+  if (!Array.isArray(links) || links.length >= MAXIMUM_LINKS_PER_TENANT) {
+    throw new V2SurveillancePublicationReadAdapterError(
+      "RESOURCE_LIMIT",
+      "V2 publication-link sidecar cannot prove the tenant result set is complete"
+    );
+  }
+  for (const link of links) {
+    if (!link || typeof link !== "object" || link.tenantId !== tenantId) {
+      integrity("V2 publication-link sidecar crossed its tenant boundary during list");
+    }
+  }
+  return links;
+}
+
+async function projectDisable(
+  publicationLinks: GovernedCertifiedSnapshotPublicationLinkCatalogReadPortV2,
+  tenantId: string,
+  publicationId: string
+): Promise<SurveillancePublicationDisableEventV1 | undefined> {
+  const links = await listBounded(publicationLinks, tenantId);
+  const link = links.find((candidate) =>
+    candidate.tenantId === tenantId && candidate.publication.publicationId === publicationId
+  );
+  if (!link) return undefined;
+  const disable = await publicationLinks.getDisable(tenantId, link.linkId);
+  if (!disable) return undefined;
+  if (disable.tenantId !== tenantId || disable.linkId !== link.linkId || disable.linkHash !== link.linkHash) {
+    integrity("V2 publication-link disable authority substituted tenant, link, or immutable hash");
+  }
+  return Object.freeze({
+    tenantId,
+    publicationId: link.publication.publicationId,
+    publicationHash: link.publication.publicationHash,
+    reasonCode: disable.reasonCode,
+    reason: disable.reason,
+    disabledBy: disable.disabledBy,
+    disabledAt: disable.disabledAt
+  });
+}
+
+function assertAuthorityResolution(
+  tenantId: string,
+  selected: GovernedCertifiedSnapshotPublicationLinkV2,
+  resolved: ResolvedGovernedCertifiedSnapshotPublicationMetadataV2 | ResolvedGovernedCertifiedSnapshotPublicationV2
+): void {
+  if (
+    resolved.link.tenantId !== tenantId ||
+    canonicalJson(resolved.link) !== canonicalJson(selected) ||
+    resolved.evidence.tenantId !== tenantId ||
+    resolved.evidence.certificationAttempt.certificationManifestId !== selected.evidence.evidenceId ||
+    resolved.snapshot.tenantId !== tenantId ||
+    resolved.snapshot.snapshotId !== selected.governance.certificationAttempt.snapshotId ||
+    resolved.snapshot.snapshotHash !== selected.governance.certificationAttempt.snapshotHash
+  ) {
+    integrity("V2 publication authority substituted governed publication, evidence, or snapshot lineage");
+  }
+}
+
+function parseEmbeddedPublication(
+  resolved: ResolvedGovernedCertifiedSnapshotPublicationMetadataV2 | ResolvedGovernedCertifiedSnapshotPublicationV2
+): CertifiedSnapshotPublicationV1 {
+  try {
+    return parseCertifiedSnapshotPublicationV1(resolved.link.publication.record);
+  } catch (error) {
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    integrity(`V2 authority returned a malformed embedded publication${detail}`);
   }
 }
 

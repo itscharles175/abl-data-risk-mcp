@@ -1,14 +1,26 @@
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
-import type { BffConfiguration } from "../src/config.js";
+import { loadBffConfiguration, type BffConfiguration } from "../src/config.js";
 import type { AuthorizationRequest, OidcIdentityProvider } from "../src/oidc.js";
+import {
+  FixtureRiskPlatformAdapter,
+  type RiskPlatformAdapter,
+} from "../src/platform-adapter.js";
+import {
+  PilotJobServiceError,
+  type PilotJobActorContext,
+  type PilotJobServicePort,
+  type PilotPortfolioSurveillanceStartInput,
+} from "../src/pilot-job-service.js";
+import { InMemorySessionStore, type SessionStore } from "../src/session.js";
 
 const ORIGIN = "http://localhost:4173";
 
 function configuration(overrides: Partial<BffConfiguration> = {}): BffConfiguration {
   return {
     authMode: "fixture",
+    production: false,
     port: 4300,
     consoleUrl: ORIGIN,
     allowedOrigins: new Set([ORIGIN]),
@@ -31,6 +43,29 @@ async function login(agent: ReturnType<typeof request.agent>, principalId: strin
     .send({ principalId })
     .expect(201);
   return response.body as { readonly csrfToken: string };
+}
+
+function explicitSessionStore(): SessionStore {
+  const backing = new InMemorySessionStore(60 * 60_000, 10 * 60_000);
+  return {
+    create: (principal) => backing.create(principal),
+    get: (id) => backing.get(id),
+    satisfyStepUp: (id) => backing.satisfyStepUp(id),
+    delete: (id) => backing.delete(id),
+  };
+}
+
+function environmentAdapter(): RiskPlatformAdapter {
+  const fixture = new FixtureRiskPlatformAdapter();
+  return {
+    dataMode: "environment",
+    async getWorkbenchSection(section) {
+      return { ...(await fixture.getWorkbenchSection(section)), sourceMode: "environment" };
+    },
+    async previewSourceContract(draft) {
+      return { ...(await fixture.previewSourceContract(draft)), fixture: false };
+    },
+  };
 }
 
 describe("platform BFF", () => {
@@ -349,5 +384,355 @@ describe("platform BFF", () => {
       .expect(429)
       .expect("retry-after", "60")
       .expect(({ body }) => expect(body.error.code).toBe("oidc_rate_limited"));
+  });
+
+  it("keeps the governed pilot API disabled unless a service is explicitly injected", async () => {
+    const app = buildApp({ configuration: configuration() });
+    await request(app).get("/api/v1/pilot").expect(401);
+
+    const operator = request.agent(app);
+    await login(operator, "demo-operator");
+    await operator
+      .get("/api/v1/pilot")
+      .expect(404)
+      .expect(({ body }) => expect(body.error.code).toBe("pilot_api_unavailable"));
+  });
+
+  it("derives pilot tenant, facility, and actor scope server-side for every job operation", async () => {
+    const calls: {
+      readonly name: string;
+      readonly context: PilotJobActorContext;
+      readonly input?: PilotPortfolioSurveillanceStartInput | string;
+    }[] = [];
+    const status = {
+      operation: "portfolio_surveillance_v1" as const,
+      status: "running" as const,
+      durableStatus: "submitted",
+      attemptCount: 1,
+      maxAttempts: 3,
+      cancellationRequested: false,
+      createdAt: "2026-08-15T12:00:00.000Z",
+      updatedAt: "2026-08-15T12:00:01.000Z",
+      errorCode: null,
+      resultAvailable: false,
+    };
+    const service: PilotJobServicePort = {
+      async startPortfolioSurveillance(context, input) {
+        calls.push({ name: "start", context, input });
+        return {
+          value: {
+            jobHandle: "opaque.job_handle-0123456789",
+            status: "queued",
+            operation: "portfolio_surveillance_v1",
+          },
+        };
+      },
+      async getJobStatus(context, jobHandle) {
+        calls.push({ name: "status", context, input: jobHandle });
+        return { value: status };
+      },
+      async getJobResult(context, jobHandle) {
+        calls.push({ name: "result", context, input: jobHandle });
+        return {
+          value: {
+            operation: "portfolio_surveillance_v1",
+            manifestId: "manifest-1",
+            artifactId: "artifact-1",
+            resultHash: "a".repeat(64),
+            result: { aggregateOnly: true },
+          },
+        };
+      },
+      async cancelJob(context, jobHandle) {
+        calls.push({ name: "cancel", context, input: jobHandle });
+        return { value: { ...status, status: "cancelled", cancellationRequested: true } };
+      },
+    };
+    const app = buildApp({
+      configuration: configuration(),
+      pilotJobs: {
+        scope: { tenantId: "tenant-pilot", facilityId: "facility-synthetic-auto-1" },
+        service,
+      },
+    });
+    const operator = request.agent(app);
+    const session = await login(operator, "demo-operator");
+
+    await operator.get("/api/v1/pilot").expect(200).expect({
+      enabled: true,
+      scope: { tenantId: "tenant-pilot", facilityId: "facility-synthetic-auto-1" },
+      operations: ["portfolio_surveillance_v1"],
+    });
+    const start = await operator
+      .post("/api/v1/pilot/jobs")
+      .set("origin", ORIGIN)
+      .set("x-csrf-token", session.csrfToken)
+      .send({
+        certificationManifestIds: ["cert-june", "cert-july"],
+        definitionVersionIds: ["definition-metrics", "definition-methodology"],
+        idempotencyKey: "synthetic-auto-july-replay",
+        purpose: "monthly_surveillance",
+      })
+      .expect(202);
+    expect(start.body).toMatchObject({
+      scope: { tenantId: "tenant-pilot", facilityId: "facility-synthetic-auto-1" },
+      job: { jobHandle: "opaque.job_handle-0123456789", status: "queued" },
+    });
+    expect(calls[0]).toEqual({
+      name: "start",
+      context: {
+        tenantId: "tenant-pilot",
+        facilityId: "facility-synthetic-auto-1",
+        principalId: "demo-operator",
+        roles: ["platform_operator"],
+      },
+      input: {
+        operation: "portfolio_surveillance_v1",
+        operationRequest: {
+          contractVersion: 1,
+          operation: "portfolio_surveillance_v1",
+          sources: [
+            { kind: "certification_manifest", certificationManifestId: "cert-june" },
+            { kind: "certification_manifest", certificationManifestId: "cert-july" },
+          ],
+          definitionVersionIds: ["definition-metrics", "definition-methodology"],
+        },
+        idempotencyKey: "synthetic-auto-july-replay",
+        purpose: "monthly_surveillance",
+      },
+    });
+
+    const handle = "opaque.job_handle-0123456789";
+    await operator.get(`/api/v1/pilot/jobs/${handle}/status`).expect(200);
+    await operator.get(`/api/v1/pilot/jobs/${handle}/result`).expect(200);
+    await operator
+      .post(`/api/v1/pilot/jobs/${handle}/cancel`)
+      .set("origin", ORIGIN)
+      .set("x-csrf-token", session.csrfToken)
+      .send({})
+      .expect(200);
+    expect(calls.slice(1).map(({ name }) => name)).toEqual(["status", "result", "cancel"]);
+    expect(calls.slice(1).every(({ context }) =>
+      context.tenantId === "tenant-pilot" &&
+      context.facilityId === "facility-synthetic-auto-1" &&
+      context.principalId === "demo-operator"
+    )).toBe(true);
+  });
+
+  it("rejects client-supplied scope, requires operator authority, and preserves write protections", async () => {
+    const service: PilotJobServicePort = {
+      async startPortfolioSurveillance() { throw new Error("must not be called"); },
+      async getJobStatus() { throw new Error("must not be called"); },
+      async getJobResult() { throw new Error("must not be called"); },
+      async cancelJob() { throw new Error("must not be called"); },
+    };
+    const app = buildApp({
+      configuration: configuration(),
+      pilotJobs: {
+        scope: { tenantId: "tenant-pilot", facilityId: "facility-synthetic-auto-1" },
+        service,
+      },
+    });
+    const analyst = request.agent(app);
+    await login(analyst, "demo-analyst");
+    await analyst.get("/api/v1/pilot").expect(403);
+
+    const operator = request.agent(app);
+    const session = await login(operator, "demo-operator");
+    const body = {
+      certificationManifestIds: ["cert-june", "cert-july"],
+      definitionVersionIds: ["definition-metrics", "definition-methodology"],
+      idempotencyKey: "synthetic-auto-july-replay",
+      purpose: "monthly_surveillance",
+      tenantId: "attacker-tenant",
+    };
+    await operator
+      .post("/api/v1/pilot/jobs")
+      .set("origin", ORIGIN)
+      .set("x-csrf-token", session.csrfToken)
+      .send(body)
+      .expect(400)
+      .expect(({ body: responseBody }) => expect(responseBody.error.code).toBe("invalid_pilot_job"));
+    await operator
+      .post("/api/v1/pilot/jobs")
+      .set("origin", ORIGIN)
+      .send({
+        certificationManifestIds: ["cert-june", "cert-july"],
+        definitionVersionIds: ["definition-metrics", "definition-methodology"],
+        idempotencyKey: "synthetic-auto-july-replay",
+        purpose: "monthly_surveillance",
+      })
+      .expect(403)
+      .expect(({ body: responseBody }) => expect(responseBody.error.code).toBe("csrf_rejected"));
+    await operator
+      .post("/api/v1/pilot/jobs/opaque.job_handle-0123456789/cancel")
+      .set("origin", "https://attacker.invalid")
+      .set("x-csrf-token", session.csrfToken)
+      .send({})
+      .expect(403)
+      .expect(({ body: responseBody }) => expect(responseBody.error.code).toBe("origin_rejected"));
+  });
+
+  it("maps only declared pilot service failures to public API errors", async () => {
+    const service: PilotJobServicePort = {
+      async startPortfolioSurveillance() {
+        throw new PilotJobServiceError(409, "idempotency_conflict", "Key is already in use");
+      },
+      async getJobStatus() {
+        throw new PilotJobServiceError(404, "job_not_found", "Job was not found");
+      },
+      async getJobResult() {
+        throw new PilotJobServiceError(409, "result_not_ready", "Result is not ready");
+      },
+      async cancelJob() {
+        throw new PilotJobServiceError(410, "job_terminal", "Job is already terminal");
+      },
+    };
+    const app = buildApp({
+      configuration: configuration(),
+      pilotJobs: {
+        scope: { tenantId: "tenant-pilot", facilityId: "facility-synthetic-auto-1" },
+        service,
+      },
+    });
+    const operator = request.agent(app);
+    const session = await login(operator, "demo-operator");
+    await operator
+      .post("/api/v1/pilot/jobs")
+      .set("origin", ORIGIN)
+      .set("x-csrf-token", session.csrfToken)
+      .send({
+        certificationManifestIds: ["cert-june", "cert-july"],
+        definitionVersionIds: ["definition-metrics", "definition-methodology"],
+        idempotencyKey: "synthetic-auto-july-replay",
+        purpose: "monthly_surveillance",
+      })
+      .expect(409)
+      .expect(({ body }) => expect(body.error.code).toBe("idempotency_conflict"));
+    await operator
+      .get("/api/v1/pilot/jobs/opaque.job_handle-0123456789/status")
+      .expect(404)
+      .expect(({ body }) => expect(body.error.code).toBe("job_not_found"));
+    await operator
+      .get("/api/v1/pilot/jobs/opaque.job_handle-0123456789/result")
+      .expect(409)
+      .expect(({ body }) => expect(body.error.code).toBe("result_not_ready"));
+    await operator
+      .post("/api/v1/pilot/jobs/opaque.job_handle-0123456789/cancel")
+      .set("origin", ORIGIN)
+      .set("x-csrf-token", session.csrfToken)
+      .send({})
+      .expect(410)
+      .expect(({ body }) => expect(body.error.code).toBe("job_terminal"));
+  });
+
+  it("fails closed on missing, unknown, or fixture authentication in production", async () => {
+    expect(() => loadBffConfiguration({ NODE_ENV: "production" })).toThrow(
+      "BFF_AUTH_MODE=oidc is required in production",
+    );
+    expect(() => loadBffConfiguration({
+      NODE_ENV: "production",
+      BFF_AUTH_MODE: "fixture",
+    })).toThrow("BFF_AUTH_MODE=oidc is required in production");
+    expect(() => loadBffConfiguration({ BFF_AUTH_MODE: "unexpected" })).toThrow(
+      "BFF_AUTH_MODE must be either 'fixture' or 'oidc'",
+    );
+  });
+
+  it("requires explicit non-fixture dependencies and exposes no fixture auth in production", async () => {
+    const productionConfiguration = configuration({
+      authMode: "oidc",
+      production: true,
+      secureCookies: true,
+      oidc: {
+        issuer: "https://identity.example.test/",
+        clientId: "abl-console",
+        redirectUri: "https://console.example.test/api/auth/callback",
+        scopes: ["openid", "profile", "email", "roles"],
+      },
+    });
+    expect(() => buildApp({ configuration: productionConfiguration })).toThrow(
+      "Production BFF requires an explicit environment-backed data adapter",
+    );
+    expect(() => buildApp({
+      configuration: productionConfiguration,
+      adapter: environmentAdapter(),
+    })).toThrow("Production BFF requires an explicit durable session store");
+    expect(() => buildApp({
+      configuration: productionConfiguration,
+      adapter: new FixtureRiskPlatformAdapter(),
+      sessions: explicitSessionStore(),
+    })).toThrow("Production BFF requires an explicit environment-backed data adapter");
+
+    const app = buildApp({
+      configuration: productionConfiguration,
+      adapter: environmentAdapter(),
+      sessions: explicitSessionStore(),
+    });
+    await request(app)
+      .post("/api/auth/fixture-login")
+      .set("origin", ORIGIN)
+      .send({ principalId: "demo-operator" })
+      .expect(404)
+      .expect(({ body }) => expect(body.error.code).toBe("fixture_auth_disabled"));
+    await request(app)
+      .post("/api/auth/fixture-step-up")
+      .set("origin", ORIGIN)
+      .send({})
+      .expect(404)
+      .expect(({ body }) => expect(body.error.code).toBe("fixture_auth_disabled"));
+  });
+
+  it("rejects malformed or secret-bearing injected outputs before browser disclosure", async () => {
+    const malformedAdapter: RiskPlatformAdapter = {
+      dataMode: "environment",
+      async getWorkbenchSection(section) {
+        return {
+          ...(await environmentAdapter().getWorkbenchSection(section)),
+          password: "must-never-reach-the-browser",
+        } as never;
+      },
+      async previewSourceContract(draft) {
+        return environmentAdapter().previewSourceContract(draft);
+      },
+    };
+    const malformedApp = buildApp({
+      configuration: configuration(),
+      adapter: malformedAdapter,
+    });
+    const analyst = request.agent(malformedApp);
+    await login(analyst, "demo-analyst");
+    const malformedResponse = await analyst.get("/api/v1/workbench/overview").expect(500);
+    expect(JSON.stringify(malformedResponse.body)).not.toContain("must-never-reach-the-browser");
+
+    const secretResultService: PilotJobServicePort = {
+      async startPortfolioSurveillance() { throw new Error("not reached"); },
+      async getJobStatus() { throw new Error("not reached"); },
+      async getJobResult() {
+        return {
+          value: {
+            operation: "portfolio_surveillance_v1",
+            manifestId: "manifest-1",
+            artifactId: "artifact-1",
+            resultHash: "a".repeat(64),
+            result: { password: "must-never-reach-the-browser" },
+          },
+        };
+      },
+      async cancelJob() { throw new Error("not reached"); },
+    };
+    const secretResultApp = buildApp({
+      configuration: configuration(),
+      pilotJobs: {
+        scope: { tenantId: "tenant-pilot", facilityId: "facility-synthetic-auto-1" },
+        service: secretResultService,
+      },
+    });
+    const operator = request.agent(secretResultApp);
+    await login(operator, "demo-operator");
+    const secretResponse = await operator
+      .get("/api/v1/pilot/jobs/opaque.job_handle-0123456789/result")
+      .expect(500);
+    expect(JSON.stringify(secretResponse.body)).not.toContain("must-never-reach-the-browser");
   });
 });

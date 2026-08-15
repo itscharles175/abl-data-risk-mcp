@@ -1,5 +1,4 @@
 import {
-  canonicalHash,
   canonicalJson,
   createCertifiedSnapshotArtifactMetadataV1,
   parseDatasetSnapshotV2,
@@ -19,17 +18,19 @@ import {
   type GovernedCertifiedSnapshotPublicationLinkV2
 } from "../contracts/governed-certified-snapshot-publication-link-v2.js";
 import { ArtifactStoreError, type ArtifactStore, type StoredArtifact } from "../control/artifacts.js";
-import type { GovernedSnapshotCaptureLineageReadPortV1, GovernedSnapshotCommitLineageV1 } from "../repositories/governed-snapshot-commit.js";
+import type {
+  DatasetSnapshotCorrectionReadPortV1,
+  GovernedSnapshotCaptureLineageReadPortV1,
+  GovernedSnapshotCommitLineageV1
+} from "../repositories/governed-snapshot-commit.js";
 import type { ImmutableRepositoryPort } from "../repositories/ports.js";
 import {
   GovernedDefinitionV2ResolverError,
+  sameGovernedDefinitionExecutionReferenceV2,
   type GovernedDefinitionExecutionReferenceV2,
   type GovernedDefinitionV2Resolver,
   type ResolvedGovernedDefinitionV2
 } from "./governed-definition-v2-resolver.js";
-
-const PAGE_SIZE = 1_000;
-const MAX_SNAPSHOTS_PER_TENANT = 1_000_000;
 
 /**
  * Read port for the immutable publication-link sidecar.  The authority does
@@ -37,19 +38,25 @@ const MAX_SNAPSHOTS_PER_TENANT = 1_000_000;
  * unrecorded governance lineage.
  */
 export interface GovernedCertifiedSnapshotPublicationLinkReadPortV2 {
+  /** Returns immutable link evidence regardless of any later disable event. */
+  get(
+    tenantId: string,
+    linkId: string
+  ): Promise<GovernedCertifiedSnapshotPublicationLinkV2 | undefined> | GovernedCertifiedSnapshotPublicationLinkV2 | undefined;
   /**
-   * Returns only a link that has not been disabled.  The V2 publication
-   * authority deliberately has no raw-read capability: revocation is part of
-   * selection authority, not an optional post-read policy check.
+   * Returns only a link that has not been disabled. Materialization uses this
+   * view; historical metadata verification uses get so a disable after the
+   * planning cutoff does not rewrite the past.
    */
   getEnabled(
     tenantId: string,
     linkId: string
-  ): Promise<GovernedCertifiedSnapshotPublicationLinkV2 | undefined>;
+  ): Promise<GovernedCertifiedSnapshotPublicationLinkV2 | undefined> | GovernedCertifiedSnapshotPublicationLinkV2 | undefined;
 }
 
 export interface RepositoryBackedSurveillanceSourcePublicationAuthorityV2Dependencies {
-  readonly datasetSnapshots: ImmutableRepositoryPort<DatasetSnapshotV2>;
+  readonly datasetSnapshots: ImmutableRepositoryPort<DatasetSnapshotV2> &
+    DatasetSnapshotCorrectionReadPortV1;
   readonly captureLineage: GovernedSnapshotCaptureLineageReadPortV1;
   readonly certifiedSnapshotEvidence: ImmutableRepositoryPort<CertifiedSnapshotEvidenceRecordV2>;
   readonly publicationLinks: GovernedCertifiedSnapshotPublicationLinkReadPortV2;
@@ -69,6 +76,16 @@ export interface ResolvedGovernedCertifiedSnapshotPublicationV2 {
   /** Exact server-reloaded metadata; never reconstructed from the evidence envelope. */
   readonly normalizedArtifact: StoredArtifact;
 }
+
+/**
+ * Fully verified publication metadata. This shape deliberately contains no
+ * normalized artifact payload or ArtifactStore result and is safe to use
+ * while policy is still being evaluated.
+ */
+export type ResolvedGovernedCertifiedSnapshotPublicationMetadataV2 = Omit<
+  ResolvedGovernedCertifiedSnapshotPublicationV2,
+  "normalizedArtifact"
+>;
 
 export type SurveillanceProductionAuthorityV2ErrorCode =
   | "INTEGRITY_FAILURE"
@@ -100,11 +117,11 @@ export class RepositoryBackedSurveillanceSourcePublicationAuthorityV2 {
    * immutable evidence returns undefined; every mismatch or malformed record
    * fails closed with an integrity error.
    */
-  async resolve(input: {
+  async resolveMetadata(input: {
     readonly tenantId: string;
     readonly linkId: string;
-  }): Promise<ResolvedGovernedCertifiedSnapshotPublicationV2 | undefined> {
-    const linkValue = await this.#dependencies.publicationLinks.getEnabled(input.tenantId, input.linkId);
+  }): Promise<ResolvedGovernedCertifiedSnapshotPublicationMetadataV2 | undefined> {
+    const linkValue = await this.#dependencies.publicationLinks.get(input.tenantId, input.linkId);
     if (!linkValue) return undefined;
     const link = verified(() => parseGovernedCertifiedSnapshotPublicationLinkV2(linkValue));
     if (link.tenantId !== input.tenantId || link.linkId !== input.linkId) {
@@ -139,7 +156,6 @@ export class RepositoryBackedSurveillanceSourcePublicationAuthorityV2 {
     ) {
       integrity("Publication link, V2 evidence, snapshot, or governed capture lineage is inconsistent");
     }
-    await this.#assertTerminalSnapshot(snapshot);
     this.#assertCaptureLineage(evidence, snapshot, lineage);
 
     const [controlDefinition, sourceContractDefinition, scopeBindingDefinition, mappingDefinition] =
@@ -164,8 +180,6 @@ export class RepositoryBackedSurveillanceSourcePublicationAuthorityV2 {
       scopeBindingDefinition,
       mappingDefinition
     );
-    const normalizedArtifact = this.#reloadArtifact(input.tenantId, evidence);
-
     return Object.freeze({
       link,
       evidence,
@@ -174,9 +188,73 @@ export class RepositoryBackedSurveillanceSourcePublicationAuthorityV2 {
       controlDefinition,
       sourceContractDefinition,
       scopeBindingDefinition,
-      mappingDefinition,
-      normalizedArtifact
+      mappingDefinition
     });
+  }
+
+  /**
+   * Post-policy materialization authority. It requires the link to remain
+   * enabled, rechecks current correction terminality, and only then reloads
+   * the tenant-scoped normalized artifact.
+   */
+  async resolveArtifact(input: {
+    readonly tenantId: string;
+    readonly linkId: string;
+  }): Promise<ResolvedGovernedCertifiedSnapshotPublicationV2 | undefined> {
+    const selected = await this.#dependencies.publicationLinks.getEnabled(input.tenantId, input.linkId);
+    if (!selected) return undefined;
+    const metadata = await this.resolveMetadata(input);
+    if (!metadata) return undefined;
+    if (canonicalJson(selected) !== canonicalJson(metadata.link)) {
+      integrity("Enabled V2 publication-link selector substituted immutable link evidence");
+    }
+    await this.#assertTerminalSnapshot(metadata.snapshot);
+
+    // Recheck immediately before the first payload read. A disable that lands
+    // during metadata verification must prevent normalized-byte access.
+    const enabled = await this.#dependencies.publicationLinks.getEnabled(input.tenantId, input.linkId);
+    if (!enabled) return undefined;
+    if (canonicalJson(enabled) !== canonicalJson(metadata.link)) {
+      integrity("Enabled V2 publication-link changed before artifact verification");
+    }
+    // A correction may be committed while metadata is being verified. Repeat
+    // terminality after the enabled check, then close a possible disable
+    // window once more before crossing the artifact boundary.
+    await this.#assertTerminalSnapshot(metadata.snapshot);
+    const finalEnabled = await this.#dependencies.publicationLinks.getEnabled(input.tenantId, input.linkId);
+    if (!finalEnabled) return undefined;
+    if (canonicalJson(finalEnabled) !== canonicalJson(metadata.link)) {
+      integrity("Enabled V2 publication-link changed at the artifact-read boundary");
+    }
+    // The enabled lookup itself may race a correction commit.  Recheck
+    // terminality after that final selector read so a newly superseded
+    // snapshot never crosses the payload boundary.
+    await this.#assertTerminalSnapshot(metadata.snapshot);
+    const normalizedArtifact = this.#reloadArtifact(input.tenantId, metadata.evidence);
+
+    // The local pilot stores publication state and snapshot lineage in
+    // independent durable components, so there is no cross-component read
+    // transaction.  Treat these post-read checks as the disclosure barrier:
+    // bytes loaded during a concurrent transition are discarded and never
+    // returned to the materializer.
+    const postReadEnabled = await this.#dependencies.publicationLinks.getEnabled(
+      input.tenantId,
+      input.linkId
+    );
+    if (!postReadEnabled) return undefined;
+    if (canonicalJson(postReadEnabled) !== canonicalJson(metadata.link)) {
+      integrity("Enabled V2 publication-link changed after artifact verification");
+    }
+    await this.#assertTerminalSnapshot(metadata.snapshot);
+    return Object.freeze({ ...metadata, normalizedArtifact });
+  }
+
+  /** @deprecated Use resolveMetadata before policy and resolveArtifact after policy. */
+  async resolve(input: {
+    readonly tenantId: string;
+    readonly linkId: string;
+  }): Promise<ResolvedGovernedCertifiedSnapshotPublicationV2 | undefined> {
+    return this.resolveArtifact(input);
   }
 
   #resolveDefinition(
@@ -201,9 +279,8 @@ export class RepositoryBackedSurveillanceSourcePublicationAuthorityV2 {
     }
     if (
       expected.kind !== expectedKind ||
-      canonicalJson(resolved.reference) !== canonicalJson(expected) ||
-      resolved.approvalEvidence.approvalEventHash !== expected.approvalEventHash ||
-      canonicalHash(resolved.executionDocument) !== expected.documentHash
+      !sameGovernedDefinitionExecutionReferenceV2(resolved.reference, expected) ||
+      resolved.approvalEvidence.approvalEventHash !== expected.approvalEventHash
     ) {
       integrity("Frozen governed definition does not match the V2 certification governance reference");
     }
@@ -224,18 +301,16 @@ export class RepositoryBackedSurveillanceSourcePublicationAuthorityV2 {
     const mapping = verified(() => parseMappingSpecV2(mappingDefinition.executionDocument));
     if (
       canonicalJson(control) !== canonicalJson(evidence.governance.control.definition) ||
-      canonicalJson({
-        sourceContractId: source.sourceContractId,
-        revision: source.revision,
-        sourceContractHash: source.sourceContractHash
-      }) !== canonicalJson(evidence.governance.sourceContract.raw) ||
+      source.sourceContractId !== evidence.governance.sourceContract.raw.sourceContractId ||
+      source.revision !== evidence.governance.sourceContract.raw.revision ||
+      source.sourceKey !== sourceContractDefinition.reference.definitionKey ||
       canonicalJson(scope) !== canonicalJson(evidence.governance.scopeBinding.raw) ||
       source.tenantId !== evidence.tenantId ||
       scope.tenantId !== evidence.tenantId ||
       mapping.tenantId !== evidence.tenantId ||
       mapping.mappingSpecId !== evidence.governance.mapping.execution.mappingSpecId ||
       mapping.revision !== evidence.governance.mapping.execution.mappingSpecRevision ||
-      mapping.mappingSpecHash !== evidence.governance.mapping.execution.mappingSpecHash ||
+      mapping.mappingKey !== mappingDefinition.reference.definitionKey ||
       canonicalJson(mapping.sourceContract) !== canonicalJson(evidence.governance.sourceContract.raw) ||
       canonicalJson(source.delivery) !== canonicalJson(snapshot.delivery)
     ) {
@@ -287,35 +362,25 @@ export class RepositoryBackedSurveillanceSourcePublicationAuthorityV2 {
   }
 
   async #assertTerminalSnapshot(snapshot: DatasetSnapshotV2): Promise<void> {
-    let cursor: string | undefined;
-    let seen = 0;
-    do {
-      const page = await this.#dependencies.datasetSnapshots.list(snapshot.tenantId, {
-        limit: PAGE_SIZE,
-        ...(cursor === undefined ? {} : { cursor })
-      });
-      seen += page.items.length;
-      if (seen > MAX_SNAPSHOTS_PER_TENANT) {
-        throw new SurveillanceProductionAuthorityV2Error(
-          "RESOURCE_LIMIT",
-          "Tenant snapshot history exceeds the V2 publication resolution bound"
-        );
-      }
-      for (const candidateValue of page.items) {
-        const candidate = verified(() => parseDatasetSnapshotV2(candidateValue));
-        if (
-          candidate.correction.kind === "correction" &&
-          candidate.correction.correctsSnapshotId === snapshot.snapshotId &&
-          candidate.correction.correctsSnapshotHash === snapshot.snapshotHash
-        ) {
-          throw new SurveillanceProductionAuthorityV2Error(
-            "NON_TERMINAL_SNAPSHOT",
-            "A corrected snapshot cannot be selected for a V2 publication"
-          );
-        }
-      }
-      cursor = page.nextCursor ?? undefined;
-    } while (cursor !== undefined);
+    const correctionValue = await this.#dependencies.datasetSnapshots.getDirectCorrection(
+      snapshot.tenantId,
+      snapshot.snapshotId,
+      snapshot.snapshotHash
+    );
+    if (!correctionValue) return;
+    const correction = verified(() => parseDatasetSnapshotV2(correctionValue));
+    if (
+      correction.tenantId !== snapshot.tenantId ||
+      correction.correction.kind !== "correction" ||
+      correction.correction.correctsSnapshotId !== snapshot.snapshotId ||
+      correction.correction.correctsSnapshotHash !== snapshot.snapshotHash
+    ) {
+      integrity("Direct correction authority substituted snapshot lineage");
+    }
+    throw new SurveillanceProductionAuthorityV2Error(
+      "NON_TERMINAL_SNAPSHOT",
+      "A corrected snapshot cannot be selected for a V2 publication"
+    );
   }
 }
 

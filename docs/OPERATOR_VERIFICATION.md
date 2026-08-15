@@ -73,6 +73,8 @@ Network or registry failure fails this opted-in gate; it is never silently downg
 
 The default release run requires a clean working tree on a named branch, rejects GitHub Actions workflows, checks GitNexus freshness, performs a frozen pnpm install, and runs `pnpm run verify`. Run it only after committing the intended release changes.
 
+GitNexus freshness uses the checkout-local runner when one exists and otherwise requires the installed `gitnexus` CLI on `PATH`. A fresh clone must run `gitnexus analyze` before release verification; a missing or stale index fails the gate without a silent downgrade.
+
 The default run does not build, publish, sign, scan, deploy, migrate, or restore production infrastructure. Those gates require approved tools, registries, identities, clusters, and evidence destinations and are opt-in as described below.
 
 ## External command manifest

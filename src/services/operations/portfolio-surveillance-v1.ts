@@ -1110,11 +1110,47 @@ export function assertAggregateOnlyPortfolioSurveillanceResultV1(
   assertPortfolioSurveillanceResultMatchesPlan(result, plan, expectedAggregate);
 }
 
+/**
+ * Verifies a result that has already passed deterministic replay before it was
+ * committed as immutable evidence. This deliberately does not execute the
+ * analytics engine: durable reads rebind the self-hashed aggregate to the
+ * exact frozen plan and rely on the content-addressed result/manifest chain.
+ */
+export function assertPlanBoundPortfolioSurveillanceResultEvidenceV1(
+  result: PortfolioSurveillanceOperationResultV1,
+  planValue: PortfolioSurveillanceExecutionPlanV1
+): void {
+  const plan = parsePortfolioSurveillanceExecutionPlanV1(planValue);
+  parsePlanBoundPortfolioSurveillanceResultEvidence(result, plan);
+}
+
+/** Derives accounting from already-certified immutable result evidence. */
+export function accountPlanBoundPortfolioSurveillanceResultEvidenceV1(
+  result: PortfolioSurveillanceOperationResultV1,
+  plan: PortfolioSurveillanceExecutionPlanV1
+): AnalysisOperationResultAccountingV2 {
+  assertPlanBoundPortfolioSurveillanceResultEvidenceV1(result, plan);
+  return portfolioSurveillanceResultAccounting(result);
+}
+
 function assertPortfolioSurveillanceResultMatchesPlan(
   result: PortfolioSurveillanceOperationResultV1,
   plan: PortfolioSurveillanceExecutionPlanV1,
   expectedAggregate: PortfolioSurveillanceResultV1
 ): void {
+  const parsed = parsePlanBoundPortfolioSurveillanceResultEvidence(result, plan);
+  if (canonicalJson(parsed.aggregate) !== canonicalJson(expectedAggregate)) {
+    invalid(
+      "DISCLOSURE_POLICY_VIOLATION",
+      "Aggregate surveillance result does not match deterministic execution of the frozen plan"
+    );
+  }
+}
+
+function parsePlanBoundPortfolioSurveillanceResultEvidence(
+  result: PortfolioSurveillanceOperationResultV1,
+  plan: PortfolioSurveillanceExecutionPlanV1
+): Readonly<z.infer<typeof PortfolioSurveillanceOperationResultSchema>> {
   let parsed: Readonly<z.infer<typeof PortfolioSurveillanceOperationResultSchema>>;
   try {
     parsed = parseWithSchema(
@@ -1150,12 +1186,7 @@ function assertPortfolioSurveillanceResultMatchesPlan(
   ) {
     invalid("DISCLOSURE_POLICY_VIOLATION", "Aggregate surveillance result identity is invalid");
   }
-  if (canonicalJson(parsed.aggregate) !== canonicalJson(expectedAggregate)) {
-    invalid(
-      "DISCLOSURE_POLICY_VIOLATION",
-      "Aggregate surveillance result does not match deterministic execution of the frozen plan"
-    );
-  }
+  return parsed;
 }
 
 export function accountPortfolioSurveillanceOperationResultV1(
@@ -1163,6 +1194,12 @@ export function accountPortfolioSurveillanceOperationResultV1(
   plan: PortfolioSurveillanceExecutionPlanV1
 ): AnalysisOperationResultAccountingV2 {
   assertAggregateOnlyPortfolioSurveillanceResultV1(result, plan);
+  return portfolioSurveillanceResultAccounting(result);
+}
+
+function portfolioSurveillanceResultAccounting(
+  result: PortfolioSurveillanceOperationResultV1
+): AnalysisOperationResultAccountingV2 {
   const cells = result.aggregate.metrics.flatMap((metric) => metric.cells);
   const populationHashes = sortedUnique(
     cells.flatMap((cell) => cellPopulationHashes(cell.lineage))

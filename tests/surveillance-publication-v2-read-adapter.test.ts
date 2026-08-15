@@ -15,9 +15,11 @@ import type {
   GovernedCertifiedSnapshotPublicationLinkDisableEventV2
 } from "../src/control/governed-certified-snapshot-publication-links-v2.js";
 import type {
+  ResolvedGovernedCertifiedSnapshotPublicationMetadataV2,
   ResolvedGovernedCertifiedSnapshotPublicationV2
 } from "../src/services/surveillance-production-authority-v2.js";
 import {
+  V2OnlySurveillancePublicationMaterializationReadAdapter,
   V2OnlySurveillancePublicationReadAdapter,
   V2SurveillancePublicationReadAdapterError,
   type GovernedCertifiedSnapshotPublicationLinkCatalogReadPortV2
@@ -25,7 +27,7 @@ import {
 
 const HASH = (value: unknown): Sha256Hash => canonicalHash(value);
 
-test("V2-only adapter resolves certification-manifest selections only through an enabled link and V2 authority", async () => {
+test("V2 preflight adapter verifies metadata without invoking artifact authority", async () => {
   const fixture = fixtureEnvironment();
 
   const byEvidence = await fixture.adapter.getByCertificationManifest("tenant-a", "certification-a");
@@ -44,17 +46,30 @@ test("V2-only adapter resolves certification-manifest selections only through an
   assert.equal(byPublication?.publicationHash, fixture.publication.publicationHash);
   assert.deepEqual(page.publications.map((publication) => publication.publicationId), ["publication-a"]);
   assert.equal(page.complete, true);
-  assert.equal(fixture.authority.calls.length, 3);
+  assert.equal(fixture.authority.metadataCalls.length, 3);
+  assert.equal(fixture.authority.artifactCalls.length, 0);
 });
 
-test("V2-only adapter does not call authority or fall back when the sidecar link is disabled", async () => {
+test("V2 materialization adapter invokes full authority only after an enabled recheck", async () => {
+  const fixture = fixtureEnvironment();
+  const material = await fixture.materializationAdapter.get("tenant-a", "publication-a");
+
+  assert.equal(material?.publicationHash, fixture.publication.publicationHash);
+  assert.equal(fixture.authority.metadataCalls.length, 0);
+  assert.equal(fixture.authority.artifactCalls.length, 1);
+});
+
+test("V2 preflight retains later-disabled evidence while materialization fails before artifact authority", async () => {
   const fixture = fixtureEnvironment({ disabled: true });
 
   const result = await fixture.adapter.getByCertificationManifest("tenant-a", "certification-a");
   const disable = await fixture.adapter.getDisable("tenant-a", "publication-a");
+  const material = await fixture.materializationAdapter.get("tenant-a", "publication-a");
 
-  assert.equal(result, undefined);
-  assert.equal(fixture.authority.calls.length, 0);
+  assert.equal(result?.publicationHash, fixture.publication.publicationHash);
+  assert.equal(material, undefined);
+  assert.equal(fixture.authority.metadataCalls.length, 1);
+  assert.equal(fixture.authority.artifactCalls.length, 0);
   assert.deepEqual(disable, {
     tenantId: "tenant-a",
     publicationId: "publication-a",
@@ -82,18 +97,21 @@ test("V2-only adapter rejects catalog tenant substitution before consulting the 
     fixture.adapter.getByCertificationManifest("tenant-a", "certification-a"),
     (error: unknown) => adapterError(error, "INTEGRITY_FAILURE")
   );
-  assert.equal(fixture.authority.calls.length, 0);
+  assert.equal(fixture.authority.metadataCalls.length, 0);
+  assert.equal(fixture.authority.artifactCalls.length, 0);
 });
 
 test("V2-only adapter has no V1 fallback when no V2 evidence link exists", async () => {
   const fixture = fixtureEnvironment({ omitEvidenceLink: true });
 
   assert.equal(await fixture.adapter.getByCertificationManifest("tenant-a", "certification-a"), undefined);
-  assert.equal(fixture.authority.calls.length, 0);
+  assert.equal(fixture.authority.metadataCalls.length, 0);
+  assert.equal(fixture.authority.artifactCalls.length, 0);
 });
 
 interface Fixture {
   readonly adapter: V2OnlySurveillancePublicationReadAdapter;
+  readonly materializationAdapter: V2OnlySurveillancePublicationMaterializationReadAdapter;
   readonly authority: FakeAuthority;
   readonly publication: CertifiedSnapshotPublicationV1;
 }
@@ -108,8 +126,9 @@ function fixtureEnvironment(options: {
   const link = linkFor(publication, options.substituteCatalogTenant ? "tenant-b" : "tenant-a");
   const catalog = new FakeCatalog(options.omitEvidenceLink ? [] : [link], options.disabled ? link.linkId : undefined);
   const authority = new FakeAuthority(link, options.substituteAuthorityLink);
-  const adapter = new V2OnlySurveillancePublicationReadAdapter({ authority, publicationLinks: catalog });
-  return { adapter, authority, publication };
+  const adapter = new V2OnlySurveillancePublicationReadAdapter({ metadataAuthority: authority, publicationLinks: catalog });
+  const materializationAdapter = new V2OnlySurveillancePublicationMaterializationReadAdapter({ artifactAuthority: authority, publicationLinks: catalog });
+  return { adapter, materializationAdapter, authority, publication };
 }
 
 class FakeCatalog implements GovernedCertifiedSnapshotPublicationLinkCatalogReadPortV2 {
@@ -150,15 +169,16 @@ class FakeCatalog implements GovernedCertifiedSnapshotPublicationLinkCatalogRead
 }
 
 class FakeAuthority {
-  readonly calls: Array<{ readonly tenantId: string; readonly linkId: string }> = [];
+  readonly metadataCalls: Array<{ readonly tenantId: string; readonly linkId: string }> = [];
+  readonly artifactCalls: Array<{ readonly tenantId: string; readonly linkId: string }> = [];
 
   constructor(
     private readonly link: GovernedCertifiedSnapshotPublicationLinkV2,
     private readonly substituteLink: boolean
   ) {}
 
-  async resolve(input: { readonly tenantId: string; readonly linkId: string }): Promise<ResolvedGovernedCertifiedSnapshotPublicationV2 | undefined> {
-    this.calls.push(input);
+  async resolveMetadata(input: { readonly tenantId: string; readonly linkId: string }): Promise<ResolvedGovernedCertifiedSnapshotPublicationMetadataV2 | undefined> {
+    this.metadataCalls.push(input);
     if (input.tenantId !== this.link.tenantId || input.linkId !== this.link.linkId) return undefined;
     const resolvedLink = this.substituteLink
       ? { ...this.link, linkHash: HASH("substituted-link") }
@@ -174,7 +194,17 @@ class FakeAuthority {
         snapshotId: this.link.governance.certificationAttempt.snapshotId,
         snapshotHash: this.link.governance.certificationAttempt.snapshotHash
       }
-    } as ResolvedGovernedCertifiedSnapshotPublicationV2;
+    } as ResolvedGovernedCertifiedSnapshotPublicationMetadataV2;
+  }
+
+  async resolveArtifact(input: { readonly tenantId: string; readonly linkId: string }): Promise<ResolvedGovernedCertifiedSnapshotPublicationV2 | undefined> {
+    this.artifactCalls.push(input);
+    const before = this.metadataCalls.length;
+    const metadata = await this.resolveMetadata(input);
+    this.metadataCalls.splice(before);
+    return metadata === undefined
+      ? undefined
+      : { ...metadata, normalizedArtifact: {} as never };
   }
 }
 

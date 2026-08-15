@@ -427,7 +427,7 @@ function governedDeliveryResolution(
         format: source.delivery.format,
         connectorId: source.delivery.connectorId,
         bucket: source.delivery.bucket,
-        objectKey: `sdart/2026-08.${source.delivery.format}`,
+        objectKey: `synthetic-auto/2026-08.${source.delivery.format}`,
         immutableVersionId: "version-v17",
         immutableVersionHash: hash("version-v17"),
         contentHash: hash("content:original"),
@@ -529,7 +529,7 @@ function sourceContract(kind: "postgresql" | "object_xlsx" | "object_parquet"): 
         connectorId: "object-primary",
         credentialRef: "kms/object/readonly",
         bucket: "loan-tapes",
-        keyPattern: kind === "object_xlsx" ? "sdart/*.xlsx" : "sdart/*.parquet",
+        keyPattern: kind === "object_xlsx" ? "synthetic-auto/*.xlsx" : "synthetic-auto/*.parquet",
         immutableVersionRequired: true as const
       };
   const parserPolicy = kind === "postgresql"

@@ -23,7 +23,7 @@ The greenfield platform foundation is implemented and covered by the repository 
 | AR borrowing base | Implemented: eligibility, cross-aging, concentration, advance rate, sublimit, reserves, commitment, usage and availability | Credit-agreement rule pack and parallel BBC reconciliation |
 | Monitoring | Implemented: typed thresholds, certification gate, durable deduplicated cases and transitions | External schedule, owners/SLAs, approved notification delivery |
 | Durable execution | Implemented: signed replay-protected plans, principal-bound handles, durable queue/leases/reaping/results/audit | Load/failure testing in target infrastructure; shared-store design for scale |
-| Deployment | Implemented: Dockerfile, Compose, Kubernetes base, operator-run security/release checks, operations/release docs; current working-tree image passed local runtime, SBOM, vulnerability, secret, IaC, and schema gates | Immutable post-commit target-architecture build, registry/signing/provenance, live cloud deployment and restore |
+| Deployment | Implemented: Dockerfile, Compose, Kubernetes base, operator-run security/release checks, operations/release docs | Exact-commit runtime/SBOM/vulnerability/secret/IaC/schema evidence, immutable target-architecture build, registry/signing/provenance, live cloud deployment and restore |
 
 There remains no arbitrary SQL, raw-row MCP tool, source-system write, calendar scheduler, notification dispatcher, or autonomous credit decision.
 

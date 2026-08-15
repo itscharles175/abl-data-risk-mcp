@@ -277,7 +277,11 @@ function createFixture(overrides: {
     keys: { "key-2026": Buffer.alloc(32, 43) }
   });
   const material = new SqliteCapturedSourceMaterialStoreV1(join(directory, "material.sqlite"));
-  const publisher = new CapturedSourceMaterialPublisherV1({ artifacts, material });
+  const publisher = new CapturedSourceMaterialPublisherV1({
+    artifacts,
+    material,
+    maximumSectionBytes: 1_000_000
+  });
   const authority = new ArtifactBackedModernSnapshotSourceEvidenceAuthorityV1({ artifacts, material });
   let remainingSuccessfulPublishes = overrides.failAfterMaterialPublishCount ??
     (overrides.failAfterMaterialOnce === true ? 1 : undefined);

@@ -76,13 +76,15 @@ test("captured source material replays the exact bound artifact across encryptio
     const firstArtifacts = new ArtifactStore(artifactRoot, { activeKeyId: "key-1", keys });
     const first = await new CapturedSourceMaterialPublisherV1({
       artifacts: firstArtifacts,
-      material: store
+      material: store,
+      maximumSectionBytes: 1_000_000
     }).publish(sectionArtifact());
 
     const rotatedArtifacts = new ArtifactStore(artifactRoot, { activeKeyId: "key-2", keys });
     const replay = await new CapturedSourceMaterialPublisherV1({
       artifacts: rotatedArtifacts,
-      material: store
+      material: store,
+      maximumSectionBytes: 1_000_000
     }).publish(sectionArtifact());
 
     assert.equal(replay.replayed, true);
@@ -102,7 +104,11 @@ function createFixture() {
     keys: { "key-2026": Buffer.alloc(32, 19) }
   });
   const store = new SqliteCapturedSourceMaterialStoreV1(databasePath);
-  const publisher = new CapturedSourceMaterialPublisherV1({ artifacts, material: store });
+  const publisher = new CapturedSourceMaterialPublisherV1({
+    artifacts,
+    material: store,
+    maximumSectionBytes: 1_000_000
+  });
   const authority = new ArtifactBackedModernSnapshotSourceEvidenceAuthorityV1({ artifacts, material: store });
   return {
     databasePath,
@@ -128,9 +134,9 @@ function sectionArtifact() {
     snapshotHash: canonicalHash({ snapshot: "2026-08" }),
     extractionReceiptHash: canonicalHash({ receipt: "capture-2026-08" }),
     sourceContract: {
-      sourceContractId: "sdart-loan-tape",
+      sourceContractId: "synthetic-auto-loan-tape",
       revision: 1,
-      sourceContractHash: canonicalHash({ contract: "sdart-loan-tape", revision: 1 })
+      sourceContractHash: canonicalHash({ contract: "synthetic-auto-loan-tape", revision: 1 })
     },
     sectionId: "loans",
     sectionContentHash: canonicalHash({ section: "loans", bytes: "exact" }),

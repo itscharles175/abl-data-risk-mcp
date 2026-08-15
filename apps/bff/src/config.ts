@@ -11,6 +11,7 @@ export interface OidcConfiguration {
 
 export interface BffConfiguration {
   readonly authMode: "fixture" | "oidc";
+  readonly production: boolean;
   readonly port: number;
   readonly consoleUrl: string;
   readonly allowedOrigins: ReadonlySet<string>;
@@ -32,7 +33,19 @@ function normalizedOrigin(value: string): string {
 export function loadBffConfiguration(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): BffConfiguration {
-  const authMode = env.BFF_AUTH_MODE === "oidc" ? "oidc" : "fixture";
+  const production = env.NODE_ENV === "production";
+  const requestedAuthMode = env.BFF_AUTH_MODE;
+  if (
+    requestedAuthMode !== undefined &&
+    requestedAuthMode !== "fixture" &&
+    requestedAuthMode !== "oidc"
+  ) {
+    throw new Error("BFF_AUTH_MODE must be either 'fixture' or 'oidc'");
+  }
+  const authMode = requestedAuthMode ?? "fixture";
+  if (production && authMode !== "oidc") {
+    throw new Error("BFF_AUTH_MODE=oidc is required in production");
+  }
   const consoleUrl = normalizedOrigin(env.BFF_CONSOLE_URL ?? "http://127.0.0.1:4173");
   const allowedOrigins = new Set(
     (env.BFF_ALLOWED_ORIGINS ?? consoleUrl)
@@ -51,6 +64,7 @@ export function loadBffConfiguration(
 
   const base: BffConfiguration = {
     authMode,
+    production,
     port: z.coerce.number().int().min(1).max(65_535).parse(env.BFF_PORT ?? 4300),
     consoleUrl,
     allowedOrigins,

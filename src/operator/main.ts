@@ -6,7 +6,12 @@ import { pathToFileURL } from "node:url";
 import { RuntimeConfigurationError, type RuntimeEnvironment } from "../runtime/config.js";
 import { runOperatorCli, type OperatorCliIo } from "./cli.js";
 import type { OperatorControlPlane } from "./control-plane.js";
-import { createOperatorRuntime, OperatorRuntimeError } from "./runtime.js";
+import {
+  createOperatorRuntime,
+  deriveLocalOperatorPrincipal,
+  OperatorRuntimeError,
+  type OperatorRuntimeOptions
+} from "./runtime.js";
 
 export async function runOperatorMain(
   argv: readonly string[] = process.argv.slice(2),
@@ -14,14 +19,15 @@ export async function runOperatorMain(
   io: OperatorCliIo = {
     stdout: (line) => process.stdout.write(`${line}\n`),
     stderr: (line) => process.stderr.write(`${line}\n`)
-  }
+  },
+  runtimeOptions: OperatorRuntimeOptions = {}
 ): Promise<number> {
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "help")) {
     return runOperatorCli(argv, {} as OperatorControlPlane, io);
   }
   let runtime: ReturnType<typeof createOperatorRuntime> | undefined;
   try {
-    runtime = createOperatorRuntime(environment);
+    runtime = createOperatorRuntime(environment, deriveLocalOperatorPrincipal(), runtimeOptions);
     return await runOperatorCli(argv, runtime.controlPlane, io);
   } catch (error) {
     if (error instanceof RuntimeConfigurationError) {

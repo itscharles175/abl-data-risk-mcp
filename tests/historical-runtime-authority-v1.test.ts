@@ -218,12 +218,12 @@ function registerEvidence(authority: SqliteHistoricalRuntimeAuthorityV1) {
     version: "1.0.0",
     mediaType: "application/json",
     createdAt: "2026-08-13T09:20:00.000Z",
-    content: { name: "SDART certification", sections: ["loan_tape"] },
+    content: { name: "Synthetic auto certification", sections: ["loan_tape"] },
     idempotencyKey: "methodology-register"
   }).value;
   if (methodology.bundleKind !== "methodology") throw new Error("expected methodology reference");
   const runtime = authority.registerRuntime(MAKER, {
-    runtimeBundleId: "runtime-sdart-v1",
+    runtimeBundleId: "runtime-synthetic-auto-v1",
     runtimeVersion: "1.0.0",
     dictionary,
     mappingCompiler: compiler,

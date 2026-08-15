@@ -9,6 +9,7 @@ import {
   type OperatorPrincipal
 } from "../src/operator/control-plane.js";
 import { OperatorInputError } from "../src/operator/schemas.js";
+import { ModernSnapshotCaptureError } from "../src/services/modern-snapshot-capture.js";
 
 const HASH_A = `sha256:${"a".repeat(64)}`;
 const HASH_B = `sha256:${"b".repeat(64)}`;
@@ -280,6 +281,43 @@ test("CLI dispatches modern commands and redacts missing-capability details", as
     },
     ok: false
   });
+});
+
+test("CLI preserves declared modern failure codes without leaking trusted evidence details", async () => {
+  const plane = new OperatorControlPlane(
+    dependencies({
+      modernSnapshotCapture: {
+        capture: async () => {
+          throw new ModernSnapshotCaptureError(
+            "EXTRACTION_SUBSTITUTION",
+            "private connector, object key, source hash, and database relation"
+          );
+        }
+      }
+    })
+  );
+  const output = captureIo();
+
+  assert.equal(
+    await runOperatorCli(["extract-sql-v2", "--request", "ignored.json"], plane, output.io, {
+      readRequest: () => ({
+        sourceContractId: "source-contract-001",
+        deliveryId: "delivery-001"
+      })
+    }),
+    3
+  );
+  assert.deepEqual(JSON.parse(output.stderr[0]!), {
+    error: {
+      code: "EXTRACTION_SUBSTITUTION",
+      message: "Governed operator operation was rejected"
+    },
+    ok: false
+  });
+  assert.equal(output.stderr[0]!.includes("private connector"), false);
+  assert.equal(output.stderr[0]!.includes("object key"), false);
+  assert.equal(output.stderr[0]!.includes("source hash"), false);
+  assert.equal(output.stderr[0]!.includes("database relation"), false);
 });
 
 function captureIo(): {

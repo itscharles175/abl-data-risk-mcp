@@ -737,7 +737,7 @@ function sourceContract(
         connectorId: "object-primary",
         credentialRef: "kms/object/readonly",
         bucket: "loan-tapes",
-        keyPattern: kind === "object_xlsx" ? "sdart/*.xlsx" : "sdart/*.parquet",
+        keyPattern: kind === "object_xlsx" ? "synthetic-auto/*.xlsx" : "synthetic-auto/*.parquet",
         immutableVersionRequired: true as const
       };
   const parserPolicy = kind === "postgresql"
@@ -854,7 +854,7 @@ function postgresqlLocator(source: SourceContractV1): GovernedSourceDeliveryLoca
 
 function objectLocator(
   source: SourceContractV1,
-  objectKey = "sdart/SDART_2019-3_2021-10.xlsx"
+  objectKey = "synthetic-auto/reference-2021-10.xlsx"
 ): GovernedSourceDeliveryLocatorV1 {
   assert.equal(source.delivery.mode, "object_storage");
   const immutableVersionId = "s3-version-0001";

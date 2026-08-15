@@ -1,0 +1,76 @@
+{
+  "$schema": "https://unpkg.com/@stag175/vizier@0.3.0/dist/vizier.config.schema.json",
+  "configVersion": 1,
+  "app": {
+    "mode": "managed",
+    "startCommand": "VIZIER_UI_CHECK=1 pnpm run dev:platform",
+    "baseUrl": "http://127.0.0.1:4173",
+    "startupTimeoutMs": 60000,
+    "readyPath": "/",
+    "expectTitle": "ABL Portfolio Risk Console"
+  },
+  "browser": {
+    "headless": true,
+    "browserName": "chromium",
+    "defaultTimeoutMs": 30000,
+    "fullPage": true,
+    "timezoneId": "America/New_York",
+    "locale": "en-US"
+  },
+  "routes": ["/"],
+  "viewports": [
+    { "name": "desktop", "coverage": "required", "width": 1440, "height": 1000, "deviceScaleFactor": 1, "isMobile": false, "hasTouch": false, "reducedMotion": "reduce" },
+    { "name": "mobile", "coverage": "required", "width": 390, "height": 844, "deviceScaleFactor": 3, "isMobile": true, "hasTouch": true, "reducedMotion": "reduce" }
+  ],
+  "matrix": {
+    "engines": [{ "name": "chromium", "coverage": "required" }],
+    "roles": { "operator": { "coverage": "required", "scenario": "operator-pilot" } },
+    "maxSurfaces": 4
+  },
+  "capture": {
+    "scenarios": {
+      "operator-pilot": [
+        { "op": "wait", "for": "selector", "selector": "button:has-text('Jordan Operator')", "timeoutMs": 10000 },
+        { "op": "click", "selector": "button:has-text('Jordan Operator')" },
+        { "op": "wait", "for": "selector", "selector": "button:has-text('Jobs')", "timeoutMs": 10000 },
+        { "op": "click", "selector": "button:has-text('Jobs')" },
+        { "op": "wait", "for": "selector", "selector": "[data-testid='pilot-workflow']", "timeoutMs": 10000 },
+        { "op": "assert", "kind": "textPresent", "text": "Single-facility surveillance run" }
+      ]
+    },
+    "mask": [".user-menu .avatar"],
+    "randomSeed": 1
+  },
+  "analysis": {
+    "includeVision": false,
+    "includeA11y": true,
+    "includeConsole": false,
+    "includeNetwork": false,
+    "includeVisualDiff": false,
+    "includeHeuristics": false,
+    "includeDesign": false,
+    "includeDesignIntentVision": false,
+    "includeWebVitals": false,
+    "minTouchTarget": 24
+  },
+  "gate": {
+    "mode": "absolute",
+    "visionAuthority": "corroborated",
+    "advisoryChecks": ["cross-viewport-disappearance", "color-scheme-contrast", "reflow"],
+    "waivers": [],
+    "flakeThreshold": 0,
+    "minScore": 85,
+    "failOnConsoleErrors": true,
+    "failOnNetworkErrors": false,
+    "maxCriticalIssues": 0,
+    "maxHighSeverityIssues": 0,
+    "maxMediumSeverityIssues": 3,
+    "requireDesktopPass": true,
+    "requireTabletPass": false,
+    "requireMobilePass": true,
+    "requireAllConfiguredSurfaces": true,
+    "requireSpecPass": false,
+    "minIntentScore": 0,
+    "webVitals": { "enforceCls": false, "clsBudget": 0.1 }
+  }
+}

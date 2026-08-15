@@ -18,6 +18,7 @@ import {
 import { artifactJsonContentHash } from "../control/artifacts.js";
 import { PORTFOLIO_SURVEILLANCE_V1_DESCRIPTOR } from "./operations/portfolio-surveillance-v1.js";
 import {
+  accountPlanBoundPortfolioSurveillanceResultEvidenceV1,
   accountPortfolioSurveillanceOperationResultV1,
   parsePortfolioSurveillanceExecutionPlanV1,
   type PortfolioSurveillanceExecutionPlanV1,
@@ -441,6 +442,11 @@ export type GovernedResultArtifactV4Input = Readonly<
   z.input<typeof GovernedResultArtifactV4SeedSchema>
 >;
 
+export interface GovernedResultFinalizationInstrumentationV4 {
+  /** Test/telemetry hook; it cannot replace or alter deterministic validation. */
+  readonly onDeterministicReplay?: () => void;
+}
+
 /**
  * The only artifact-minting path. It validates the exact frozen execution plan,
  * reruns deterministic disclosure validation, derives accounting, and enforces
@@ -450,7 +456,8 @@ export function finalizeGovernedResultArtifactV4(
   input: GovernedResultArtifactV4Input,
   envelopeValue: unknown,
   planValue: PortfolioSurveillanceExecutionPlanV1,
-  executionAuthorizationValue: GovernedExecutionAuthorizationV4
+  executionAuthorizationValue: GovernedExecutionAuthorizationV4,
+  instrumentation?: GovernedResultFinalizationInstrumentationV4
 ): GovernedResultArtifactV4 {
   const seed = parseWithSchema(
     GovernedResultArtifactV4SeedSchema,
@@ -465,7 +472,11 @@ export function finalizeGovernedResultArtifactV4(
     "GovernedExecutionAuthorizationV4"
   );
   assertExecutionAuthorization(executionAuthorization, envelope);
-  const accounting = validatedAccounting(seed.result, plan);
+  const accounting = validatedAccounting(
+    seed.result,
+    plan,
+    instrumentation?.onDeterministicReplay
+  );
   const core = parseWithSchema(GovernedResultArtifactV4CoreSchema, {
     ...seed,
     authorization: executionAuthorization,
@@ -478,11 +489,12 @@ export function finalizeGovernedResultArtifactV4(
     accountingHash: canonicalHash(core.accounting),
     resultHash: canonicalHash(core.result)
   });
-  assertGovernedResultArtifactV4MatchesEnvelope(
+  assertGovernedResultArtifactV4MatchesEnvelopeUsingAccounting(
     artifact,
     envelope,
     plan,
-    executionAuthorization
+    executionAuthorization,
+    accounting
   );
   return artifact;
 }
@@ -567,6 +579,53 @@ export function assertGovernedResultArtifactV4MatchesEnvelope(
   );
   assertExecutionAuthorization(executionAuthorization, envelope);
   const expectedAccounting = validatedAccounting(result.result, plan);
+  assertGovernedResultArtifactV4MatchesEnvelopeUsingAccounting(
+    result,
+    envelope,
+    plan,
+    executionAuthorization,
+    expectedAccounting
+  );
+}
+
+/**
+ * Verifies immutable result evidence on recovery/read paths without replaying
+ * the full analytics engine. Deterministic replay remains mandatory before
+ * the artifact is minted; subsequent reads verify its exact bytes, hashes,
+ * accounting, authorization, and frozen-plan lineage.
+ */
+export function assertGovernedResultArtifactV4EvidenceMatchesEnvelope(
+  resultValue: unknown,
+  envelopeValue: unknown,
+  planValue: PortfolioSurveillanceExecutionPlanV1,
+  executionAuthorizationValue: GovernedExecutionAuthorizationV4
+): void {
+  const result = parseGovernedResultArtifactV4Structure(resultValue);
+  const envelope = parseGovernedExecutionEnvelopeV4(envelopeValue);
+  const plan = parseAndBindPlan(planValue, envelope);
+  const executionAuthorization = parseWithSchema(
+    ExecutionAuthorizationSchema,
+    executionAuthorizationValue,
+    "GovernedExecutionAuthorizationV4"
+  );
+  assertExecutionAuthorization(executionAuthorization, envelope);
+  const expectedAccounting = evidencedAccounting(result.result, plan);
+  assertGovernedResultArtifactV4MatchesEnvelopeUsingAccounting(
+    result,
+    envelope,
+    plan,
+    executionAuthorization,
+    expectedAccounting
+  );
+}
+
+function assertGovernedResultArtifactV4MatchesEnvelopeUsingAccounting(
+  result: GovernedResultArtifactV4,
+  envelope: GovernedExecutionEnvelopeV4,
+  plan: PortfolioSurveillanceExecutionPlanV1,
+  executionAuthorization: GovernedExecutionAuthorizationV4,
+  expectedAccounting: GovernedResultAccountingV4
+): void {
   const expectedLineage = governedV4LineageFromEnvelope(envelope);
   if (
     result.tenantId !== envelope.tenantId ||
@@ -901,9 +960,11 @@ function parseAndBindPlan(
 
 function validatedAccounting(
   resultValue: CanonicalJsonValue,
-  plan: PortfolioSurveillanceExecutionPlanV1
+  plan: PortfolioSurveillanceExecutionPlanV1,
+  onDeterministicReplay?: () => void
 ): GovernedResultAccountingV4 {
   try {
+    onDeterministicReplay?.();
     const operationResult = resultValue as unknown as PortfolioSurveillanceOperationResultV1;
     const accounting = accountPortfolioSurveillanceOperationResultV1(operationResult, plan);
     const warningCount = operationResult.aggregate.metrics.reduce(
@@ -924,6 +985,37 @@ function validatedAccounting(
     );
   } catch {
     invariant("GovernedResultArtifactV4 result failed deterministic disclosure validation");
+  }
+}
+
+function evidencedAccounting(
+  resultValue: CanonicalJsonValue,
+  plan: PortfolioSurveillanceExecutionPlanV1
+): GovernedResultAccountingV4 {
+  try {
+    const operationResult = resultValue as unknown as PortfolioSurveillanceOperationResultV1;
+    const accounting = accountPlanBoundPortfolioSurveillanceResultEvidenceV1(
+      operationResult,
+      plan
+    );
+    const warningCount = operationResult.aggregate.metrics.reduce(
+      (sum, metric) => sum + metric.warnings.length,
+      0
+    );
+    const metricHeaderCount = operationResult.aggregate.metrics.length;
+    return parseWithSchema(
+      ResultAccountingSchema,
+      {
+        ...accounting,
+        cellCount: accounting.aggregateRows,
+        warningCount,
+        metricHeaderCount,
+        disclosedItemCount: accounting.aggregateRows + warningCount + metricHeaderCount
+      },
+      "GovernedResultAccountingV4"
+    );
+  } catch {
+    invariant("GovernedResultArtifactV4 persisted evidence validation failed");
   }
 }
 

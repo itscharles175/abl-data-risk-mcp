@@ -4,10 +4,8 @@ import {
   canonicalHash,
   canonicalJson,
   IdentifierSchema,
-  IsoDateSchema,
   IsoTimestampSchema,
   parseGovernedDatasetScopeBindingV1,
-  Sha256HashSchema,
   parseHistoricalRuntimeBundleV1,
   parseMappingSpecV2,
   parseSourceContractV1,
@@ -53,9 +51,7 @@ import type {
 } from "../control/lifecycle-snapshot-certification-definition-authority-v1.js";
 import {
   reconcileSegmentsV2,
-  runDataQualityV2,
-  type DataQualityRuleV2,
-  type SegmentedControlTotalV2
+  runDataQualityV2
 } from "../domain/data-quality-v2.js";
 import { RepositoryError, type ImmutableRepositoryPort } from "../repositories/ports.js";
 import type { CertificationArtifactStagingStoreV1 } from "../repositories/certification-artifact-staging-v1.js";
@@ -71,6 +67,22 @@ import {
   type GovernedSourceDeliveryCaptureAuthorityV1,
   type ModernSnapshotExtractionReceiptV1
 } from "./modern-snapshot-capture.js";
+import {
+  DataQualityDefinitionV1Schema,
+  EffectiveWindowV1Schema,
+  ReconciliationDefinitionV1Schema,
+  RuntimeActivationV1Schema,
+  type ModernCertificationDefinitionAuthorityV1,
+  type ModernCertificationDefinitionResolutionV1,
+  type ModernDataQualityDefinitionV1
+} from "./modern-snapshot-certification-types-v1.js";
+
+export type {
+  ModernCertificationDefinitionAuthorityV1,
+  ModernCertificationDefinitionResolutionV1,
+  ModernDataQualityDefinitionV1,
+  ModernReconciliationDefinitionV1
+} from "./modern-snapshot-certification-types-v1.js";
 
 const CertifySnapshotV2RequestSchema = z
   .object({
@@ -87,152 +99,6 @@ const TrustedCertificationActorV1Schema = z
   })
   .strict();
 
-const EffectiveWindowV1Schema = z
-  .object({
-    effectiveFrom: IsoDateSchema,
-    effectiveTo: IsoDateSchema.optional()
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.effectiveTo !== undefined && value.effectiveFrom > value.effectiveTo) {
-      context.addIssue({ code: "custom", path: ["effectiveTo"], message: "cannot precede effectiveFrom" });
-    }
-  });
-
-const DataQualityRuleV2Schema = z.discriminatedUnion("type", [
-  z
-    .object({
-      ruleId: IdentifierSchema,
-      type: z.literal("required"),
-      field: z.string().min(1).max(256),
-      severity: z.enum(["info", "warning", "error", "critical"]),
-      blocking: z.boolean()
-    })
-    .strict(),
-  z
-    .object({
-      ruleId: IdentifierSchema,
-      type: z.literal("unique"),
-      field: z.string().min(1).max(256),
-      severity: z.enum(["info", "warning", "error", "critical"]),
-      blocking: z.boolean()
-    })
-    .strict(),
-  z
-    .object({
-      ruleId: IdentifierSchema,
-      type: z.literal("allowed_values"),
-      field: z.string().min(1).max(256),
-      values: z.array(z.string().max(4_096)).min(1).max(10_000),
-      severity: z.enum(["info", "warning", "error", "critical"]),
-      blocking: z.boolean()
-    })
-    .strict(),
-  z
-    .object({
-      ruleId: IdentifierSchema,
-      type: z.literal("decimal_range"),
-      field: z.string().min(1).max(256),
-      minimum: z.string().optional(),
-      maximum: z.string().optional(),
-      severity: z.enum(["info", "warning", "error", "critical"]),
-      blocking: z.boolean()
-    })
-    .strict(),
-  z
-    .object({
-      ruleId: IdentifierSchema,
-      type: z.literal("equals_sum"),
-      field: z.string().min(1).max(256),
-      addends: z.array(z.string().min(1).max(256)).min(1).max(32),
-      tolerance: z.string(),
-      severity: z.enum(["info", "warning", "error", "critical"]),
-      blocking: z.boolean()
-    })
-    .strict()
-]);
-
-const DataQualityDefinitionV1Schema = z
-  .object({
-    definitionId: IdentifierSchema,
-    rulesetId: IdentifierSchema,
-    mappingSectionId: IdentifierSchema,
-    requiredSectionIds: z.array(IdentifierSchema).min(1).max(256),
-    rules: z.array(DataQualityRuleV2Schema).min(1).max(1_000),
-    balanceField: z.string().min(1).max(256),
-    materialBalance: z.string().regex(/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u),
-    window: EffectiveWindowV1Schema
-  })
-  .strict();
-
-const SegmentedControlTotalV2Schema: z.ZodType<SegmentedControlTotalV2> = z
-  .object({
-    dimensions: z.record(z.string().min(1).max(256), z.string().max(4_096)),
-    rowCount: z.number().int().min(0).max(1_000_000),
-    balance: z.string().regex(/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u),
-    currency: z.string().regex(/^[A-Z]{3}$/u)
-  })
-  .strict();
-
-const ReconciliationControlV1Schema = z
-  .object({
-    controlId: IdentifierSchema,
-    sectionId: IdentifierSchema,
-    recordSource: z.enum(["normalized", "source"]),
-    dimensions: z.array(z.string().min(1).max(256)).min(1).max(5),
-    balanceField: z.string().min(1).max(256),
-    currencyField: z.string().min(1).max(256),
-    expected: z.array(SegmentedControlTotalV2Schema).min(1).max(100_000),
-    balanceTolerance: z.string().regex(/^(?:0|[1-9]\d*)(?:\.\d+)?$/u)
-  })
-  .strict();
-
-const ReconciliationDefinitionV1Schema = z
-  .object({
-    definitionId: IdentifierSchema,
-    reconciliationId: IdentifierSchema,
-    requiredSectionIds: z.array(IdentifierSchema).min(1).max(256),
-    controls: z.array(ReconciliationControlV1Schema).min(1).max(256),
-    window: EffectiveWindowV1Schema
-  })
-  .strict()
-  .superRefine((value, context) => {
-    const required = new Set(value.requiredSectionIds);
-    if (required.size !== value.requiredSectionIds.length) {
-      context.addIssue({ code: "custom", path: ["requiredSectionIds"], message: "must be unique" });
-    }
-    const ids = value.controls.map((control) => control.controlId);
-    if (new Set(ids).size !== ids.length) {
-      context.addIssue({ code: "custom", path: ["controls"], message: "control ids must be unique" });
-    }
-    for (const sectionId of required) {
-      if (!value.controls.some((control) => control.sectionId === sectionId)) {
-        context.addIssue({
-          code: "custom",
-          path: ["controls"],
-          message: `required section ${sectionId} must have an executable control`
-        });
-      }
-    }
-    for (const [index, control] of value.controls.entries()) {
-      if (!required.has(control.sectionId)) {
-        context.addIssue({
-          code: "custom",
-          path: ["controls", index, "sectionId"],
-          message: "must name a required section"
-        });
-      }
-    }
-  });
-
-const RuntimeActivationV1Schema = z
-  .object({
-    runtimeBundleId: IdentifierSchema,
-    runtimeBundleHash: Sha256HashSchema,
-    window: EffectiveWindowV1Schema
-  })
-  .strict();
-
 export type CertifySnapshotV2Request = Readonly<z.infer<typeof CertifySnapshotV2RequestSchema>>;
 interface ResolvedCertifySnapshotV2Request extends CertifySnapshotV2Request {
   readonly mappingApplicationId: string;
@@ -243,20 +109,6 @@ interface ResolvedCertifySnapshotV2Request extends CertifySnapshotV2Request {
 export type TrustedCertificationActorV1 = Readonly<
   z.infer<typeof TrustedCertificationActorV1Schema>
 >;
-export interface ModernDataQualityDefinitionV1 {
-  readonly definitionId: string;
-  readonly rulesetId: string;
-  readonly mappingSectionId: string;
-  readonly requiredSectionIds: readonly string[];
-  readonly rules: readonly DataQualityRuleV2[];
-  readonly balanceField: string;
-  readonly materialBalance: string;
-  readonly window: Readonly<z.infer<typeof EffectiveWindowV1Schema>>;
-}
-export type ModernReconciliationDefinitionV1 = Readonly<
-  z.infer<typeof ReconciliationDefinitionV1Schema>
->;
-
 export interface CapturedSourcePopulationV2 {
   readonly tenantId: string;
   readonly snapshotId: string;
@@ -270,38 +122,12 @@ export interface CapturedSourcePopulationV2 {
   readonly records: readonly Readonly<Record<string, MappingSourceScalar>>[];
 }
 
-export interface ModernCertificationDefinitionResolutionV1 {
-  readonly mappingSpec: MappingSpecV2;
-  readonly mappingWindow: Readonly<z.infer<typeof EffectiveWindowV1Schema>>;
-  readonly runtime: {
-    readonly runtimeBundleId: string;
-    readonly runtimeBundleHash: Sha256Hash;
-    readonly window: Readonly<z.infer<typeof EffectiveWindowV1Schema>>;
-  };
-  readonly dataQuality: ModernDataQualityDefinitionV1;
-  readonly reconciliation: ModernReconciliationDefinitionV1;
-}
-
 export interface ModernSnapshotSourceEvidenceAuthorityV1 {
   loadSection(input: {
     readonly tenantId: string;
     readonly snapshotId: string;
     readonly sectionId: string;
   }): Promise<CapturedSourcePopulationV2 | undefined>;
-}
-
-export interface ModernCertificationDefinitionAuthorityV1 {
-  resolveForBoundSnapshot(input: {
-    readonly evidence: {
-      readonly tenantId: string;
-      readonly sourceContract: DatasetSnapshotV2["sourceContract"];
-      readonly deliveryHash: Sha256Hash;
-      readonly extractionReceipt: ModernSnapshotExtractionReceiptV1;
-      readonly delivery: GovernedSourceDeliveryRecordV1;
-      readonly scopeBinding: GovernedDatasetScopeBindingV1;
-      readonly asOfDate: string;
-    };
-  }): Promise<ModernCertificationDefinitionResolutionV1 | undefined>;
 }
 
 export interface ModernSnapshotExtractionReceiptAuthorityV1 {

@@ -10,15 +10,28 @@ const integrationTests = rootTestFiles([
   /^adapters-/,
   /^analyst-mcp-tools\./,
   /^certification-postgres\./,
+  /^composite-governed-workflow-router\./,
+  /^governed-certified-snapshot-publication-v2\./,
+  /^governed-modern-extraction-authority-v1\./,
   /^hybrid-connector\./,
   /^local-preview-v2\./,
   /^mcp-integration\./,
+  /^modern-snapshot-runtime-v1\./,
+  /^modern-snapshot-extraction-receipts-v1\./,
+  /^operator-governance-commands\./,
+  /^operator-runtime-modern-v2\./,
+  /^pilot-vertical-acceptance\./,
+  /^portfolio-surveillance-workflow-v4\./,
   /^postgres-snapshot-source\./,
   /^remote-http\./,
   /^reports-signing\./,
+  /^synthetic-abs-auto-acceptance\./,
   /^shared-/,
+  /^single-facility-v2-surveillance-runtime\./,
   /^sql-snapshot-extraction\./,
-  /^stdio-integration\./
+  /^stdio-integration\./,
+  /^surveillance-production-authority-v2\./,
+  /^surveillance-publication-v2-read-adapter\./
 ]);
 
 await runVerificationSuite({

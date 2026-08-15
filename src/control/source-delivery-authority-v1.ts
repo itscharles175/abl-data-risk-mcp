@@ -664,15 +664,27 @@ export class SqliteSourceDeliveryAuthorityV1
     return Promise.resolve(resolution.scopeBinding);
   }
 
-  listAudit(tenantValue: string): readonly SourceDeliveryAuditEventV1[] {
+  listAudit(
+    tenantValue: string,
+    afterTenantSequenceValue = 0,
+    limitValue = 100
+  ): readonly SourceDeliveryAuditEventV1[] {
     this.#assertOpen();
     const tenantId = identifier(tenantValue, "tenantId");
+    const afterTenantSequence = safeInteger(
+      afterTenantSequenceValue,
+      "afterTenantSequence",
+      0,
+      Number.MAX_SAFE_INTEGER
+    );
+    const limit = safeInteger(limitValue, "limit", 1, 1_000);
     const rows = this.#database
       .prepare(
         `SELECT * FROM source_delivery_authority_audit_v1
-          WHERE tenant_id = ? ORDER BY tenant_sequence`
+          WHERE tenant_id = ? AND tenant_sequence > ?
+          ORDER BY tenant_sequence LIMIT ?`
       )
-      .all(tenantId) as unknown as AuditRow[];
+      .all(tenantId, afterTenantSequence, limit) as unknown as AuditRow[];
     return Object.freeze(rows.map((row) => auditFromRow(row)));
   }
 

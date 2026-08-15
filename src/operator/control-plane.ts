@@ -8,14 +8,29 @@ import {
 import { resolve } from "node:path";
 import { TextDecoder } from "node:util";
 
+import type {
+  DictionaryBundleReferenceV1,
+  GovernedCertifiedSnapshotPublicationLinkV2,
+  GovernedSourceDeliveryRecordV1,
+  GovernedSourceDeliveryStatusV1,
+  HistoricalRuntimeBundleV1,
+  ImmutableBundleReferenceV1,
+  TrustedSourceDeliveryActorV1
+} from "../contracts/index.js";
 import type { MonitoringAlertStore } from "../control/alerts.js";
 import type { ArtifactStore } from "../control/artifacts.js";
+import type {
+  GovernedCertifiedSnapshotPublicationLinkCatalogV2,
+  GovernedCertifiedSnapshotPublicationLinkDisableEventV2
+} from "../control/governed-certified-snapshot-publication-links-v2.js";
 import type {
   GovernedDefinitionAuditEventV2,
   GovernedDefinitionV2Store,
   GovernedDefinitionViewV2
 } from "../control/governed-definitions-v2.js";
+import type { SqliteHistoricalRuntimeAuthorityV1 } from "../control/historical-runtime-authority-v1.js";
 import type { InputCertificationViewV1 } from "../control/input-certifications.js";
+import type { SqliteSourceDeliveryAuthorityV1 } from "../control/source-delivery-authority-v1.js";
 import {
   DefinitionStoreError,
   type DefinitionStore,
@@ -50,6 +65,8 @@ import type {
   ModernSnapshotCertificationResultV1,
   TrustedCertificationActorV1
 } from "../services/modern-snapshot-certification.js";
+import type { GovernedSourceDeliveryRegistrationServiceV1 } from "../services/governed-source-delivery-registration.js";
+import type { GovernedCertifiedSnapshotPublicationV2Service } from "../services/governed-certified-snapshot-publication-v2.js";
 import type {
   GovernedDefinitionV2Resolver,
   GovernedDefinitionExecutionReferenceV2
@@ -70,6 +87,10 @@ import {
   governedDefinitionV2ProposeInputSchema,
   governedDefinitionV2SelectEffectiveInputSchema,
   governedDefinitionV2TransitionInputSchema,
+  historicalBundleRegisterInputSchema,
+  historicalRuntimeActivateInputSchema,
+  historicalRuntimeAuditListInputSchema,
+  historicalRuntimeRegisterInputSchema,
   mappingProposeInputSchema,
   mappingTransitionInputSchema,
   membershipChangeInputSchema,
@@ -77,7 +98,15 @@ import {
   operatorIdentifierSchema,
   OperatorInputError,
   parseStrict,
+  publicationV2AuditListInputSchema,
+  publicationV2GetInputSchema,
+  publishSnapshotV2InputSchema,
   putInputArtifactInputSchema,
+  disablePublicationV2InputSchema,
+  sourceDeliveryAuditListInputSchema,
+  sourceDeliveryDisableInputSchema,
+  sourceDeliveryGetInputSchema,
+  sourceDeliveryRegisterInputSchema,
   extractSqlV2InputSchema,
   inputCertificationCertifySchema,
   inputCertificationProposeSchema,
@@ -99,12 +128,24 @@ import {
   type GovernedDefinitionV2ProposeInput,
   type GovernedDefinitionV2SelectEffectiveInput,
   type GovernedDefinitionV2TransitionInput,
+  type HistoricalBundleRegisterInput,
+  type HistoricalRuntimeActivateInput,
+  type HistoricalRuntimeAuditListInput,
+  type HistoricalRuntimeRegisterInput,
   type InputArtifactKind,
   type MappingProposeInput,
   type MappingTransitionInput,
   type MembershipChangeInput,
   type MembershipProposeInput,
+  type PublicationV2AuditListInput,
+  type PublicationV2GetInput,
+  type PublishSnapshotV2Input,
+  type DisablePublicationV2Input,
   type PutInputArtifactInput,
+  type SourceDeliveryAuditListInput,
+  type SourceDeliveryDisableInput,
+  type SourceDeliveryGetInput,
+  type SourceDeliveryRegisterInput,
   type SqlExtractInput
 } from "./schemas.js";
 
@@ -145,6 +186,24 @@ type ModernSnapshotCertificationPort = {
     actor: TrustedCertificationActorV1
   ): Promise<ModernSnapshotCertificationResultV1>;
 };
+type SourceDeliveryRegistrationPort = Pick<GovernedSourceDeliveryRegistrationServiceV1, "register">;
+type SourceDeliveryAdministrationPort = Pick<
+  SqliteSourceDeliveryAuthorityV1,
+  "disable" | "listAudit" | "resolveDeliveryStatus"
+>;
+type HistoricalRuntimeAdministrationPort = Pick<
+  SqliteHistoricalRuntimeAuthorityV1,
+  | "activateRuntime"
+  | "listAudit"
+  | "registerBundle"
+  | "registerRuntime"
+  | "resolveBundleReference"
+>;
+type GovernedPublicationV2WriterPort = Pick<GovernedCertifiedSnapshotPublicationV2Service, "publish">;
+type GovernedPublicationV2CatalogPort = Pick<
+  GovernedCertifiedSnapshotPublicationLinkCatalogV2,
+  "disable" | "get" | "getDisable" | "listAuditEvents"
+>;
 
 export interface OperatorControlPlaneDependencies {
   /**
@@ -164,6 +223,11 @@ export interface OperatorControlPlaneDependencies {
   readonly sqlExtractors?: ReadonlyMap<string, SqlExtractorPort>;
   readonly modernSnapshotCapture?: ModernSnapshotCapturePort;
   readonly modernSnapshotCertification?: ModernSnapshotCertificationPort;
+  readonly sourceDeliveryRegistration?: SourceDeliveryRegistrationPort;
+  readonly sourceDeliveryAdministration?: SourceDeliveryAdministrationPort;
+  readonly historicalRuntimeAdministration?: HistoricalRuntimeAdministrationPort;
+  readonly governedPublicationV2Writer?: GovernedPublicationV2WriterPort;
+  readonly governedPublicationV2Catalog?: GovernedPublicationV2CatalogPort;
   readonly loadLoanTape?: typeof loadLoanTapeFile;
   readonly readJsonFile?: typeof readBoundedJsonFile;
 }
@@ -191,6 +255,7 @@ export type OperatorControlPlaneErrorCode =
   | "MAPPING_NOT_READY"
   | "DEFINITION_INVALID"
   | "DEFINITION_NOT_EFFECTIVE"
+  | "NOT_FOUND"
   | "SNAPSHOT_NOT_FOUND"
   | "SNAPSHOT_MISMATCH";
 
@@ -250,6 +315,121 @@ export interface OperatorModernSnapshotCertificationSummary {
   readonly rowCount: number;
   readonly certifiedAt: string;
   readonly replayed: boolean;
+}
+
+export interface OperatorSourceDeliverySummary {
+  readonly deliveryId: string;
+  readonly deliveryRevision: number;
+  readonly deliveryHash: string;
+  readonly datasetId: string;
+  readonly facilityId: string;
+  readonly sourceContractId: string;
+  readonly sourceContractRevision: number;
+  readonly scopeBindingId: string;
+  readonly scopeBindingRevision: number;
+  readonly mode: "postgresql_pull" | "object_storage";
+  readonly format: "sql_rows" | "xlsx" | "parquet";
+  readonly sourceObservedAt: string;
+  readonly receivedAt: string;
+  readonly status: "usable" | "disabled";
+  readonly statusReason?: string;
+  readonly recordedAt: string;
+  readonly replayed?: boolean;
+}
+
+export interface OperatorSourceDeliveryAuditSummary {
+  readonly tenantSequence: number;
+  readonly eventId: string;
+  readonly eventType: "source_delivery_registered" | "source_delivery_disabled";
+  readonly deliveryId: string;
+  readonly deliveryRevision: number;
+  readonly deliveryHash: string;
+  readonly actorId: string;
+  readonly occurredAt: string;
+  readonly previousEventHash: string | null;
+  readonly eventHash: string;
+}
+
+export interface OperatorHistoricalBundleSummary {
+  readonly bundleKind: "dictionary" | "field_policy" | "mapping_compiler" | "methodology";
+  readonly bundleId: string;
+  readonly version: string;
+  readonly contentHash: string;
+  readonly mediaType: string;
+  readonly createdAt: string;
+  readonly replayed?: boolean;
+}
+
+export interface OperatorHistoricalRuntimeSummary {
+  readonly runtimeBundleId: string;
+  readonly runtimeBundleHash: string;
+  readonly runtimeVersion: string;
+  readonly dictionary: OperatorHistoricalBundleSummary;
+  readonly mappingCompiler: OperatorHistoricalBundleSummary;
+  readonly methodologies: readonly OperatorHistoricalBundleSummary[];
+  readonly assembledAt: string;
+  readonly replayed: boolean;
+}
+
+export interface OperatorHistoricalRuntimeActivationSummary {
+  readonly runtimeBundleId: string;
+  readonly runtimeBundleHash: string;
+  readonly registeredBy: string;
+  readonly registeredAt: string;
+  readonly activatedBy: string;
+  readonly activatedAt: string;
+  readonly activationHash: string;
+  readonly replayed: boolean;
+}
+
+export interface OperatorHistoricalRuntimeAuditSummary {
+  readonly tenantSequence: number;
+  readonly eventId: string;
+  readonly eventType: "bundle_registered" | "runtime_registered" | "runtime_activated";
+  readonly subjectId: string;
+  readonly subjectHash: string;
+  readonly actorId: string;
+  readonly occurredAt: string;
+  readonly previousEventHash: string | null;
+  readonly eventHash: string;
+}
+
+export interface OperatorPublicationV2Summary {
+  readonly linkId: string;
+  readonly linkHash: string;
+  readonly publicationId: string;
+  readonly publicationHash: string;
+  readonly evidenceId: string;
+  readonly evidenceHash: string;
+  readonly snapshotId: string;
+  readonly snapshotHash: string;
+  readonly governanceHash: string;
+  readonly linkedAt: string;
+  readonly enabled: boolean;
+  readonly disabled?: {
+    readonly reasonCode: string;
+    readonly disabledAt: string;
+  };
+}
+
+export interface OperatorPublicationV2DisableSummary {
+  readonly linkId: string;
+  readonly linkHash: string;
+  readonly reasonCode: string;
+  readonly disabledAt: string;
+}
+
+export interface OperatorPublicationV2AuditSummary {
+  readonly tenantSequence: number;
+  readonly eventId: string;
+  readonly eventType:
+    | "governed_certified_snapshot_publication_link_v2.recorded"
+    | "governed_certified_snapshot_publication_link_v2.disabled";
+  readonly linkId: string;
+  readonly actor: string;
+  readonly occurredAt: string;
+  readonly previousEventHash: string | null;
+  readonly eventHash: string;
 }
 
 export interface OperatorMappingSummary {
@@ -878,6 +1058,341 @@ export class OperatorControlPlane {
     };
   }
 
+  async registerSourceDelivery(inputValue: unknown): Promise<OperatorSourceDeliverySummary> {
+    const input: SourceDeliveryRegisterInput = parseStrict(
+      sourceDeliveryRegisterInputSchema,
+      inputValue,
+      "source delivery registration request"
+    );
+    const registration = this.#dependencies.sourceDeliveryRegistration;
+    const tenantId = this.#principal.tenantId;
+    if (registration === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed source delivery registration is not configured"
+      );
+    }
+    const result = await registration.register(
+      trustedPlatformActor(tenantId, this.#principal.principalId),
+      input
+    );
+    return sourceDeliveryRecordSummary(result.resolution.delivery, result.replayed);
+  }
+
+  disableSourceDelivery(inputValue: unknown): OperatorSourceDeliverySummary {
+    const input: SourceDeliveryDisableInput = parseStrict(
+      sourceDeliveryDisableInputSchema,
+      inputValue,
+      "source delivery disable request"
+    );
+    const authority = this.#dependencies.sourceDeliveryAdministration;
+    const tenantId = this.#principal.tenantId;
+    if (authority === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed source delivery administration is not configured"
+      );
+    }
+    const result = authority.disable(
+      trustedPlatformActor(tenantId, this.#principal.principalId),
+      input
+    );
+    return sourceDeliveryRecordSummary(result.resolution.delivery, result.replayed);
+  }
+
+  async getSourceDelivery(inputValue: unknown): Promise<OperatorSourceDeliverySummary> {
+    const input: SourceDeliveryGetInput = parseStrict(
+      sourceDeliveryGetInputSchema,
+      inputValue,
+      "source delivery get request"
+    );
+    const authority = this.#dependencies.sourceDeliveryAdministration;
+    const tenantId = this.#principal.tenantId;
+    if (authority === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed source delivery administration is not configured"
+      );
+    }
+    const status = await authority.resolveDeliveryStatus({ tenantId, deliveryId: input.deliveryId });
+    if (status === undefined) {
+      throw new OperatorControlPlaneError("NOT_FOUND", "Governed source delivery was not found");
+    }
+    return sourceDeliveryStatusSummary(status);
+  }
+
+  listSourceDeliveryAudit(
+    inputValue: unknown
+  ): readonly OperatorSourceDeliveryAuditSummary[] {
+    const input: SourceDeliveryAuditListInput = parseStrict(
+      sourceDeliveryAuditListInputSchema,
+      inputValue,
+      "source delivery audit request"
+    );
+    const authority = this.#dependencies.sourceDeliveryAdministration;
+    const tenantId = this.#principal.tenantId;
+    if (authority === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed source delivery administration is not configured"
+      );
+    }
+    return authority
+      .listAudit(tenantId, input.afterSequence ?? 0, input.limit ?? 100)
+      .map((event) => ({
+        tenantSequence: event.tenantSequence,
+        eventId: event.eventId,
+        eventType: event.eventType,
+        deliveryId: event.deliveryId,
+        deliveryRevision: event.deliveryRevision,
+        deliveryHash: event.deliveryHash,
+        actorId: event.actorId,
+        occurredAt: event.occurredAt,
+        previousEventHash: event.previousEventHash,
+        eventHash: event.eventHash
+      }));
+  }
+
+  registerHistoricalBundle(inputValue: unknown): OperatorHistoricalBundleSummary {
+    const input: HistoricalBundleRegisterInput = parseStrict(
+      historicalBundleRegisterInputSchema,
+      inputValue,
+      "historical bundle registration request"
+    );
+    const authority = this.#dependencies.historicalRuntimeAdministration;
+    const tenantId = this.#principal.tenantId;
+    if (authority === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Historical runtime administration is not configured"
+      );
+    }
+    const content = this.#readJsonFile(input.filePath, 8_000_000);
+    const actor = trustedPlatformActor(tenantId, this.#principal.principalId);
+    const result = input.bundleKind === "dictionary"
+      ? authority.registerBundle(actor, {
+          bundleKind: input.bundleKind,
+          bundleId: input.bundleId,
+          version: input.version,
+          mediaType: input.mediaType,
+          createdAt: input.createdAt,
+          dictionaryVersion: input.dictionaryVersion,
+          dictionaryHash: input.dictionaryHash,
+          fieldPolicyVersion: input.fieldPolicyVersion,
+          fieldPolicyHash: input.fieldPolicyHash,
+          content,
+          idempotencyKey: input.idempotencyKey
+        })
+      : authority.registerBundle(actor, {
+          bundleKind: input.bundleKind,
+          bundleId: input.bundleId,
+          version: input.version,
+          mediaType: input.mediaType,
+          createdAt: input.createdAt,
+          content,
+          idempotencyKey: input.idempotencyKey
+        });
+    return historicalBundleSummary(result.value, result.replayed);
+  }
+
+  registerHistoricalRuntime(inputValue: unknown): OperatorHistoricalRuntimeSummary {
+    const input: HistoricalRuntimeRegisterInput = parseStrict(
+      historicalRuntimeRegisterInputSchema,
+      inputValue,
+      "historical runtime registration request"
+    );
+    const authority = this.#dependencies.historicalRuntimeAdministration;
+    const tenantId = this.#principal.tenantId;
+    if (authority === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Historical runtime administration is not configured"
+      );
+    }
+    const result = authority.registerRuntime(
+      trustedPlatformActor(tenantId, this.#principal.principalId),
+      {
+        runtimeBundleId: input.runtimeBundleId,
+        runtimeVersion: input.runtimeVersion,
+        dictionary: authority.resolveBundleReference(
+          tenantId,
+          "dictionary",
+          input.dictionary.bundleId,
+          input.dictionary.version
+        ),
+        mappingCompiler: authority.resolveBundleReference(
+          tenantId,
+          "mapping_compiler",
+          input.mappingCompiler.bundleId,
+          input.mappingCompiler.version
+        ),
+        methodologies: input.methodologies.map((reference) =>
+          authority.resolveBundleReference(
+            tenantId,
+            "methodology",
+            reference.bundleId,
+            reference.version
+          )
+        ),
+        assembledAt: input.assembledAt,
+        idempotencyKey: input.idempotencyKey
+      }
+    );
+    return historicalRuntimeSummary(result.value, result.replayed);
+  }
+
+  activateHistoricalRuntime(inputValue: unknown): OperatorHistoricalRuntimeActivationSummary {
+    const input: HistoricalRuntimeActivateInput = parseStrict(
+      historicalRuntimeActivateInputSchema,
+      inputValue,
+      "historical runtime activation request"
+    );
+    const authority = this.#dependencies.historicalRuntimeAdministration;
+    const tenantId = this.#principal.tenantId;
+    if (authority === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Historical runtime administration is not configured"
+      );
+    }
+    const result = authority.activateRuntime(
+      trustedPlatformActor(tenantId, this.#principal.principalId),
+      input
+    );
+    return { ...result.value, replayed: result.replayed };
+  }
+
+  listHistoricalRuntimeAudit(
+    inputValue: unknown
+  ): readonly OperatorHistoricalRuntimeAuditSummary[] {
+    const input: HistoricalRuntimeAuditListInput = parseStrict(
+      historicalRuntimeAuditListInputSchema,
+      inputValue,
+      "historical runtime audit request"
+    );
+    const authority = this.#dependencies.historicalRuntimeAdministration;
+    const tenantId = this.#principal.tenantId;
+    if (authority === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Historical runtime administration is not configured"
+      );
+    }
+    return authority
+      .listAudit(tenantId, input.afterSequence ?? 0, input.limit ?? 100)
+      .map((event) => ({
+        tenantSequence: event.tenantSequence,
+        eventId: event.eventId,
+        eventType: event.eventType,
+        subjectId: event.subjectId,
+        subjectHash: event.subjectHash,
+        actorId: event.actorId,
+        occurredAt: event.occurredAt,
+        previousEventHash: event.previousEventHash,
+        eventHash: event.eventHash
+      }));
+  }
+
+  async publishSnapshotV2(inputValue: unknown): Promise<OperatorPublicationV2Summary> {
+    const input: PublishSnapshotV2Input = parseStrict(
+      publishSnapshotV2InputSchema,
+      inputValue,
+      "governed publication v2 request"
+    );
+    const publisher = this.#dependencies.governedPublicationV2Writer;
+    const catalog = this.#dependencies.governedPublicationV2Catalog;
+    const tenantId = this.#principal.tenantId;
+    if (publisher === undefined || catalog === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed publication v2 is not configured"
+      );
+    }
+    const link = await publisher.publish(
+      { tenantId, ...input },
+      this.#principal.principalId
+    );
+    return publicationV2Summary(link, catalog.getDisable(tenantId, link.linkId));
+  }
+
+  disablePublicationV2(inputValue: unknown): OperatorPublicationV2DisableSummary {
+    const input: DisablePublicationV2Input = parseStrict(
+      disablePublicationV2InputSchema,
+      inputValue,
+      "governed publication v2 disable request"
+    );
+    const catalog = this.#dependencies.governedPublicationV2Catalog;
+    const tenantId = this.#principal.tenantId;
+    if (catalog === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed publication v2 is not configured"
+      );
+    }
+    const disabled = catalog.disable({
+      tenantId,
+      ...input,
+      disabledBy: this.#principal.principalId
+    });
+    return {
+      linkId: disabled.linkId,
+      linkHash: disabled.linkHash,
+      reasonCode: disabled.reasonCode,
+      disabledAt: disabled.disabledAt
+    };
+  }
+
+  getPublicationV2(inputValue: unknown): OperatorPublicationV2Summary {
+    const input: PublicationV2GetInput = parseStrict(
+      publicationV2GetInputSchema,
+      inputValue,
+      "governed publication v2 get request"
+    );
+    const catalog = this.#dependencies.governedPublicationV2Catalog;
+    const tenantId = this.#principal.tenantId;
+    if (catalog === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed publication v2 is not configured"
+      );
+    }
+    const link = catalog.get(tenantId, input.linkId);
+    if (link === undefined) {
+      throw new OperatorControlPlaneError("NOT_FOUND", "Governed publication v2 was not found");
+    }
+    return publicationV2Summary(link, catalog.getDisable(tenantId, input.linkId));
+  }
+
+  listPublicationV2Audit(
+    inputValue: unknown
+  ): readonly OperatorPublicationV2AuditSummary[] {
+    const input: PublicationV2AuditListInput = parseStrict(
+      publicationV2AuditListInputSchema,
+      inputValue,
+      "governed publication v2 audit request"
+    );
+    const catalog = this.#dependencies.governedPublicationV2Catalog;
+    const tenantId = this.#principal.tenantId;
+    if (catalog === undefined || tenantId === undefined) {
+      throw new OperatorControlPlaneError(
+        "CAPABILITY_NOT_CONFIGURED",
+        "Governed publication v2 is not configured"
+      );
+    }
+    return catalog
+      .listAuditEvents(tenantId, input.afterSequence ?? 0, input.limit ?? 100)
+      .map((event) => ({
+        tenantSequence: event.tenantSequence,
+        eventId: event.eventId,
+        eventType: event.eventType,
+        linkId: event.linkId,
+        actor: event.actor,
+        occurredAt: event.occurredAt,
+        previousEventHash: event.previousEventHash,
+        eventHash: event.eventHash
+      }));
+  }
+
   putInputArtifact(inputValue: unknown): OperatorInputArtifactSummary {
     const input = parseStrict(putInputArtifactInputSchema, inputValue, "input artifact request");
     const value = validateInputArtifact(input.kind, this.#readJsonFile(input.filePath, 8_000_000));
@@ -1400,6 +1915,119 @@ function governedDefinitionV2AuditSummary(
     occurredAt: event.occurredAt,
     previousEventHash: event.previousEventHash,
     eventHash: event.eventHash
+  };
+}
+
+function trustedPlatformActor(
+  tenantId: string,
+  actorId: string
+): TrustedSourceDeliveryActorV1 {
+  return {
+    tenantId,
+    actorId,
+    authority: "platform_operator",
+    identitySource: "server_derived"
+  };
+}
+
+function sourceDeliveryRecordSummary(
+  delivery: GovernedSourceDeliveryRecordV1,
+  replayed: boolean
+): OperatorSourceDeliverySummary {
+  return {
+    deliveryId: delivery.deliveryId,
+    deliveryRevision: delivery.deliveryRevision,
+    deliveryHash: delivery.deliveryHash,
+    datasetId: delivery.datasetId,
+    facilityId: delivery.facilityId,
+    sourceContractId: delivery.sourceContract.sourceContractId,
+    sourceContractRevision: delivery.sourceContract.revision,
+    scopeBindingId: delivery.scopeBinding.bindingId,
+    scopeBindingRevision: delivery.scopeBinding.revision,
+    mode: delivery.locator.mode,
+    format: delivery.locator.mode === "postgresql_pull" ? "sql_rows" : delivery.locator.format,
+    sourceObservedAt: delivery.sourceObservedAt,
+    receivedAt: delivery.receivedAt,
+    status: delivery.status,
+    ...(delivery.statusReason === undefined ? {} : { statusReason: delivery.statusReason }),
+    recordedAt: delivery.recordedAt,
+    replayed
+  };
+}
+
+function sourceDeliveryStatusSummary(
+  status: GovernedSourceDeliveryStatusV1
+): OperatorSourceDeliverySummary {
+  return {
+    deliveryId: status.deliveryId,
+    deliveryRevision: status.deliveryRevision,
+    deliveryHash: status.deliveryHash,
+    datasetId: status.datasetId,
+    facilityId: status.facilityId,
+    sourceContractId: status.sourceContract.sourceContractId,
+    sourceContractRevision: status.sourceContract.revision,
+    scopeBindingId: status.scopeBinding.bindingId,
+    scopeBindingRevision: status.scopeBinding.revision,
+    mode: status.mode,
+    format: status.format,
+    sourceObservedAt: status.sourceObservedAt,
+    receivedAt: status.receivedAt,
+    status: status.status,
+    ...(status.statusReason === undefined ? {} : { statusReason: status.statusReason }),
+    recordedAt: status.recordedAt
+  };
+}
+
+function historicalBundleSummary(
+  reference: ImmutableBundleReferenceV1 | DictionaryBundleReferenceV1,
+  replayed?: boolean
+): OperatorHistoricalBundleSummary {
+  return {
+    bundleKind: reference.bundleKind,
+    bundleId: reference.bundleId,
+    version: reference.version,
+    contentHash: reference.contentHash,
+    mediaType: reference.mediaType,
+    createdAt: reference.createdAt,
+    ...(replayed === undefined ? {} : { replayed })
+  };
+}
+
+function historicalRuntimeSummary(
+  runtime: HistoricalRuntimeBundleV1,
+  replayed: boolean
+): OperatorHistoricalRuntimeSummary {
+  return {
+    runtimeBundleId: runtime.runtimeBundleId,
+    runtimeBundleHash: runtime.runtimeBundleHash,
+    runtimeVersion: runtime.runtimeVersion,
+    dictionary: historicalBundleSummary(runtime.dictionary),
+    mappingCompiler: historicalBundleSummary(runtime.mappingCompiler),
+    methodologies: runtime.methodologies.map((reference) => historicalBundleSummary(reference)),
+    assembledAt: runtime.assembledAt,
+    replayed
+  };
+}
+
+function publicationV2Summary(
+  link: GovernedCertifiedSnapshotPublicationLinkV2,
+  disabled: GovernedCertifiedSnapshotPublicationLinkDisableEventV2 | undefined
+): OperatorPublicationV2Summary {
+  return {
+    linkId: link.linkId,
+    linkHash: link.linkHash,
+    publicationId: link.publication.publicationId,
+    publicationHash: link.publication.publicationHash,
+    evidenceId: link.evidence.evidenceId,
+    evidenceHash: link.evidence.evidenceHash,
+    snapshotId: link.publication.snapshotId,
+    snapshotHash: link.publication.snapshotHash,
+    governanceHash: link.governance.governanceHash,
+    linkedAt: link.linkedAt,
+    enabled: disabled === undefined,
+    ...(disabled === undefined
+      ? {}
+      : { disabled: { reasonCode: disabled.reasonCode, disabledAt: disabled.disabledAt } })
   };
 }
 

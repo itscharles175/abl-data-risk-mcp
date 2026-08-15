@@ -78,6 +78,27 @@ export interface GovernedDefinitionExecutionReferenceV2 {
   readonly approvalEventHash: Sha256Hash;
 }
 
+/**
+ * Compares only the seven fields that constitute a governed definition's
+ * immutable execution reference. Certification evidence may extend this
+ * reference with definition-specific identity and activation lineage; those
+ * fields are validated separately against the resolved execution document.
+ */
+export function sameGovernedDefinitionExecutionReferenceV2(
+  left: GovernedDefinitionExecutionReferenceV2,
+  right: GovernedDefinitionExecutionReferenceV2
+): boolean {
+  return (
+    left.definitionVersionId === right.definitionVersionId &&
+    left.definitionKey === right.definitionKey &&
+    left.kind === right.kind &&
+    left.semanticVersion === right.semanticVersion &&
+    left.versionHash === right.versionHash &&
+    left.documentHash === right.documentHash &&
+    left.approvalEventHash === right.approvalEventHash
+  );
+}
+
 export interface GovernedDefinitionExecutionApprovalV2 {
   readonly status: "approved";
   readonly proposedBy: string;

@@ -52,21 +52,33 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-test("V2 authority reloads only immutable V2 evidence, capture lineage, frozen definitions, and artifact metadata", async () => {
+test("V2 artifact authority reloads immutable V2 evidence, lineage, definitions, and artifact metadata", async () => {
   const fixture = fixtureEnvironment();
-  const resolved = await fixture.authority.resolve({ tenantId: "tenant-a", linkId: fixture.link.linkId });
+  const resolved = await fixture.authority.resolveArtifact({ tenantId: "tenant-a", linkId: fixture.link.linkId });
 
   assert.ok(resolved);
   assert.equal(resolved.evidence.evidenceHash, fixture.evidence.evidenceHash);
   assert.equal(resolved.captureLineage.lineageHash, fixture.lineage.lineageHash);
   assert.equal(resolved.normalizedArtifact.artifactId, fixture.evidence.v1Evidence.normalizedArtifact.artifactId);
   assert.equal(resolved.controlDefinition.reference.definitionVersionId, "control-version-a");
+  assert.equal(fixture.artifactReadCount(), 1);
+  fixture.close();
+});
+
+test("V2 metadata authority verifies governed lineage without reading normalized artifact bytes", async () => {
+  const fixture = fixtureEnvironment();
+  const resolved = await fixture.authority.resolveMetadata({ tenantId: "tenant-a", linkId: fixture.link.linkId });
+
+  assert.ok(resolved);
+  assert.equal(resolved.evidence.evidenceHash, fixture.evidence.evidenceHash);
+  assert.equal(Object.hasOwn(resolved, "normalizedArtifact"), false);
+  assert.equal(fixture.artifactReadCount(), 0);
   fixture.close();
 });
 
 test("V2 authority does not fall back when governed capture lineage is unavailable", async () => {
   const fixture = fixtureEnvironment({ lineage: undefined });
-  const resolved = await fixture.authority.resolve({ tenantId: "tenant-a", linkId: fixture.link.linkId });
+  const resolved = await fixture.authority.resolveMetadata({ tenantId: "tenant-a", linkId: fixture.link.linkId });
 
   assert.equal(resolved, undefined);
   fixture.close();
@@ -76,17 +88,66 @@ test("V2 authority fails closed when a frozen mapping definition is substituted"
   const fixture = fixtureEnvironment({ substituteMapping: true });
 
   await assert.rejects(
-    fixture.authority.resolve({ tenantId: "tenant-a", linkId: fixture.link.linkId }),
+    fixture.authority.resolveMetadata({ tenantId: "tenant-a", linkId: fixture.link.linkId }),
     (error: unknown) => authorityError(error, "INTEGRITY_FAILURE")
   );
   fixture.close();
 });
 
-test("V2 authority refuses a link disabled in the durable V2 catalog", async () => {
+test("V2 metadata retains a later-disabled link while artifact authority requires it currently enabled", async () => {
   const fixture = fixtureEnvironment({ catalogDisabled: true });
-  const resolved = await fixture.authority.resolve({ tenantId: "tenant-a", linkId: fixture.link.linkId });
+  const metadata = await fixture.authority.resolveMetadata({ tenantId: "tenant-a", linkId: fixture.link.linkId });
+  const material = await fixture.authority.resolveArtifact({ tenantId: "tenant-a", linkId: fixture.link.linkId });
+
+  assert.ok(metadata);
+  assert.equal(material, undefined);
+  assert.equal(fixture.artifactReadCount(), 0);
+  fixture.close();
+});
+
+test("V2 metadata verifies a historical corrected ancestor while artifact authority rejects nonterminal materialization", async () => {
+  const fixture = fixtureEnvironment({ includeCorrection: true, catalogDisabled: false });
+
+  const metadata = await fixture.authority.resolveMetadata({ tenantId: "tenant-a", linkId: fixture.link.linkId });
+  assert.ok(metadata);
+  assert.equal(fixture.artifactReadCount(), 0);
+  await assert.rejects(
+    fixture.authority.resolveArtifact({ tenantId: "tenant-a", linkId: fixture.link.linkId }),
+    (error: unknown) => authorityError(error, "NON_TERMINAL_SNAPSHOT")
+  );
+  assert.equal(fixture.artifactReadCount(), 0);
+  fixture.close();
+});
+
+test("V2 artifact authority closes a disable race before normalized payload access", async () => {
+  const fixture = fixtureEnvironment({ disableOnEnabledCheck: 3 });
+
+  const resolved = await fixture.authority.resolveArtifact({ tenantId: "tenant-a", linkId: fixture.link.linkId });
 
   assert.equal(resolved, undefined);
+  assert.equal(fixture.artifactReadCount(), 0);
+  fixture.close();
+});
+
+test("V2 artifact authority closes a correction race before normalized payload access", async () => {
+  const fixture = fixtureEnvironment({ injectCorrectionOnEnabledCheck: 3 });
+
+  await assert.rejects(
+    fixture.authority.resolveArtifact({ tenantId: "tenant-a", linkId: fixture.link.linkId }),
+    (error: unknown) => authorityError(error, "NON_TERMINAL_SNAPSHOT")
+  );
+  assert.equal(fixture.artifactReadCount(), 0);
+  fixture.close();
+});
+
+test("V2 artifact authority discards payload loaded during a correction race", async () => {
+  const fixture = fixtureEnvironment({ injectCorrectionOnEnabledCheck: 4 });
+
+  await assert.rejects(
+    fixture.authority.resolveArtifact({ tenantId: "tenant-a", linkId: fixture.link.linkId }),
+    (error: unknown) => authorityError(error, "NON_TERMINAL_SNAPSHOT")
+  );
+  assert.equal(fixture.artifactReadCount(), 1);
   fixture.close();
 });
 
@@ -95,6 +156,7 @@ interface Fixture {
   readonly evidence: CertifiedSnapshotEvidenceRecordV2;
   readonly link: GovernedCertifiedSnapshotPublicationLinkV2;
   readonly lineage: GovernedSnapshotCommitLineageV1;
+  artifactReadCount(): number;
   close(): void;
 }
 
@@ -102,6 +164,9 @@ function fixtureEnvironment(options: {
   readonly lineage?: GovernedSnapshotCommitLineageV1 | undefined;
   readonly substituteMapping?: boolean;
   readonly catalogDisabled?: boolean;
+  readonly includeCorrection?: boolean;
+  readonly disableOnEnabledCheck?: number;
+  readonly injectCorrectionOnEnabledCheck?: number;
 } = {}): Fixture {
   const directory = mkdtempSync(join(tmpdir(), "surveillance-production-authority-v2-"));
   directories.push(directory);
@@ -185,6 +250,15 @@ function fixtureEnvironment(options: {
     hashes: { contentHash: HASH("snapshot-content"), schemaHash: HASH("snapshot-schema"), catalogHash: HASH("snapshot-catalog"), parserHash: HASH("snapshot-parser"), extractionHash: HASH("receipt-a") },
     rowCount: 1, byteCount: 100, sections: [{ sectionId: "loans", required: true, present: true, rowCount: 1, contentHash: HASH("snapshot-section"), schemaHash: HASH("snapshot-section-schema") }], correction: { kind: "original" }, createdBy: "capture-worker"
   });
+  const correctedSnapshot = options.includeCorrection || options.injectCorrectionOnEnabledCheck !== undefined
+    ? createDatasetSnapshotV2({
+        contractVersion: 2, tenantId: "tenant-a", snapshotId: "snapshot-a-correction", sourceContract: sourceReference, delivery: source.delivery, sourceLocator: "upload://loans-a-correction", asOfDate: snapshot.asOfDate,
+        knowledge: { sourceObservedAt: "2026-02-02T00:00:00.000Z", extractedAt: "2026-02-02T00:01:00.000Z", receivedAt: "2026-02-02T00:02:00.000Z", persistedAt: "2026-02-02T00:03:00.000Z" }, watermark: { mode: "none" },
+        hashes: { contentHash: HASH("correction-content"), schemaHash: snapshot.hashes.schemaHash, catalogHash: HASH("correction-catalog"), parserHash: snapshot.hashes.parserHash, extractionHash: HASH("correction-receipt") },
+        rowCount: 1, byteCount: 101, sections: [{ sectionId: "loans", required: true, present: true, rowCount: 1, contentHash: HASH("correction-section"), schemaHash: HASH("snapshot-section-schema") }],
+        correction: { kind: "correction", correctsSnapshotId: snapshot.snapshotId, correctsSnapshotHash: snapshot.snapshotHash, correctionSequence: 1, reasonCode: "source_correction", reason: "Source delivered a corrected population", detectedAt: "2026-02-02T00:00:00.000Z" }, createdBy: "capture-worker"
+      })
+    : undefined;
   const application = createMappingApplicationV1({
     contractVersion: 1, tenantId: "tenant-a", mappingApplicationId: "mapping-application-a", snapshot: { snapshotId: snapshot.snapshotId, snapshotHash: snapshot.snapshotHash, contentHash: snapshot.hashes.contentHash },
     mappingSpec: { mappingSpecId: mapping.mappingSpecId, revision: mapping.revision, mappingSpecHash: mapping.mappingSpecHash }, dictionaryBundle: dictionary,
@@ -196,6 +270,13 @@ function fixtureEnvironment(options: {
   });
   const artifacts = new ArtifactStore(join(directory, "artifacts"), { activeKeyId: "key-a", keys: { "key-a": Buffer.alloc(32, 7) } });
   const stored = artifacts.putJson({ tenantId: "tenant-a", kind: "normalized_snapshot", mediaType: "application/json", value: normalized });
+  let artifactReads = 0;
+  const artifactReader = {
+    getJson(tenantId: string, artifactId: string) {
+      artifactReads += 1;
+      return artifacts.getJson(tenantId, artifactId);
+    }
+  };
   const metadata = createCertifiedSnapshotArtifactMetadataV1({ artifact: normalized, loadedStoredArtifact: stored });
   const populationBody = {
     contractVersion: 1 as const, tenantId: "tenant-a", populationId: normalized.normalizedPopulationId, snapshotId: snapshot.snapshotId, snapshotHash: snapshot.snapshotHash, mappingApplicationId: application.mappingApplicationId, mappingApplicationHash: application.mappingApplicationHash,
@@ -240,7 +321,10 @@ function fixtureEnvironment(options: {
   const definitions = definitionResolver([
     resolved(controlReference, control), resolved(sourceExecution, source), resolved(scopeExecution, scope), resolved(mappingExecution, options.substituteMapping ? { ...mapping, mappingKey: "substituted-mapping" } : mapping)
   ]);
-  const catalog = options.catalogDisabled === undefined
+  const needsCatalog = options.catalogDisabled !== undefined ||
+    options.disableOnEnabledCheck !== undefined ||
+    options.injectCorrectionOnEnabledCheck !== undefined;
+  const catalog = !needsCatalog
     ? undefined
     : new GovernedCertifiedSnapshotPublicationLinkCatalogV2(join(directory, "publication-links-v2.sqlite"));
   if (catalog !== undefined) {
@@ -257,15 +341,44 @@ function fixtureEnvironment(options: {
       });
     }
   }
+  let correctionVisible = options.includeCorrection === true;
+  let enabledChecks = 0;
+  const publicationLinks: GovernedCertifiedSnapshotPublicationLinkReadPortV2 = catalog === undefined
+    ? new StaticLinkRepository(link)
+    : {
+        get(tenantId: string, linkId: string) {
+          return catalog.get(tenantId, linkId);
+        },
+        getEnabled(tenantId: string, linkId: string) {
+          enabledChecks += 1;
+          if (enabledChecks === options.injectCorrectionOnEnabledCheck) correctionVisible = true;
+          if (enabledChecks === options.disableOnEnabledCheck) {
+            catalog.disable({
+              tenantId,
+              linkId,
+              expectedLinkHash: link.linkHash,
+              reasonCode: "race_disable",
+              reason: "Injected immediately before artifact read",
+              disabledBy: "publication-worker",
+              idempotencyKey: "race-disable-link-a"
+            });
+          }
+          return catalog.getEnabled(tenantId, linkId);
+        }
+      };
   const authority = new RepositoryBackedSurveillanceSourcePublicationAuthorityV2({
-    datasetSnapshots: new StaticRepository(snapshot),
+    datasetSnapshots: new StaticRepository(
+      snapshot,
+      [snapshot],
+      () => correctionVisible && correctedSnapshot ? [snapshot, correctedSnapshot] : [snapshot]
+    ),
     captureLineage: { async getGovernedCaptureLineage() { return options.lineage === undefined && Object.hasOwn(options, "lineage") ? undefined : lineage; } },
     certifiedSnapshotEvidence: new StaticRepository(evidence),
-    publicationLinks: catalog ?? new StaticLinkRepository(link),
-    artifacts,
+    publicationLinks,
+    artifacts: artifactReader,
     definitions
   });
-  return { authority, evidence, link, lineage, close: () => catalog?.close() };
+  return { authority, evidence, link, lineage, artifactReadCount: () => artifactReads, close: () => catalog?.close() };
 }
 
 function definitionReference(
@@ -294,14 +407,33 @@ function definitionResolver(records: readonly ResolvedGovernedDefinitionV2[]) {
 }
 
 class StaticRepository<T extends { readonly tenantId: string }> implements ImmutableRepositoryPort<T> {
-  constructor(private readonly record: T) {}
+  constructor(
+    private readonly record: T,
+    private readonly records: readonly T[] = [record],
+    private readonly listRecords: () => readonly T[] = () => records
+  ) {}
   async put(): Promise<never> { throw new Error("test repository is read only"); }
   async get(tenantId: string, _recordId: string): Promise<T | undefined> { return tenantId === this.record.tenantId ? this.record : undefined; }
-  async list(tenantId: string): Promise<RepositoryPage<T>> { return { items: tenantId === this.record.tenantId ? [this.record] : [], nextCursor: null }; }
+  async list(tenantId: string): Promise<RepositoryPage<T>> { return { items: tenantId === this.record.tenantId ? this.listRecords() : [], nextCursor: null }; }
+  async getDirectCorrection(
+    tenantId: string,
+    correctsSnapshotId: string,
+    correctsSnapshotHash: string
+  ): Promise<DatasetSnapshotV2 | undefined> {
+    if (tenantId !== this.record.tenantId) return undefined;
+    return this.listRecords()
+      .map((value) => value as unknown as DatasetSnapshotV2)
+      .find((candidate) =>
+        candidate.correction?.kind === "correction" &&
+        candidate.correction.correctsSnapshotId === correctsSnapshotId &&
+        candidate.correction.correctsSnapshotHash === correctsSnapshotHash
+      );
+  }
 }
 
 class StaticLinkRepository implements GovernedCertifiedSnapshotPublicationLinkReadPortV2 {
   constructor(private readonly link: GovernedCertifiedSnapshotPublicationLinkV2) {}
+  async get(tenantId: string, linkId: string): Promise<GovernedCertifiedSnapshotPublicationLinkV2 | undefined> { return tenantId === this.link.tenantId && linkId === this.link.linkId ? this.link : undefined; }
   async getEnabled(tenantId: string, linkId: string): Promise<GovernedCertifiedSnapshotPublicationLinkV2 | undefined> { return tenantId === this.link.tenantId && linkId === this.link.linkId ? this.link : undefined; }
 }
 

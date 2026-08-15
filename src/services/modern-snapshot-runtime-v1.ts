@@ -52,6 +52,12 @@ export interface ModernSnapshotRuntimeV1Dependencies {
   readonly certificationRuntime: CertificationRuntimeAuthorityFactoryV1;
   readonly dimensions: ModernMappingDimensionAuthorityV1;
   readonly artifacts: ArtifactStore;
+  /**
+   * Explicit canonical JSON storage ceiling for each captured source section.
+   * The supplied ArtifactStore must be configured for at least this many
+   * plaintext bytes; no permissive source-material default is applied here.
+   */
+  readonly sourceMaterialMaximumBytes: number;
   /** Server-owned clock used only to mint the immutable certification attempt. */
   readonly now: () => string;
 }
@@ -86,7 +92,8 @@ export function composeModernSnapshotRuntimeV1(
   const dependencies = validateDependencies(dependenciesValue);
   const sourceMaterial = new CapturedSourceMaterialPublisherV1({
     artifacts: dependencies.artifacts,
-    material: dependencies.sourceMaterial
+    material: dependencies.sourceMaterial,
+    maximumSectionBytes: dependencies.sourceMaterialMaximumBytes
   });
   const sourceEvidence = new ArtifactBackedModernSnapshotSourceEvidenceAuthorityV1({
     artifacts: dependencies.artifacts,
@@ -152,6 +159,13 @@ function validateDependencies(value: ModernSnapshotRuntimeV1Dependencies): Moder
   }
   requiredMethod(value?.dimensions, "dimensions", "resolveForMapping");
   if (!(value?.artifacts instanceof ArtifactStore)) invalid("An encrypted ArtifactStore is required");
+  if (
+    !Number.isSafeInteger(value?.sourceMaterialMaximumBytes) ||
+    value.sourceMaterialMaximumBytes < 1_024 ||
+    value.sourceMaterialMaximumBytes > 100_000_000
+  ) {
+    invalid("sourceMaterialMaximumBytes must be an integer from 1024 through 100000000");
+  }
   if (typeof value?.now !== "function") invalid("A server-owned now function is required");
   return Object.freeze({ ...value, tenantId });
 }

@@ -128,3 +128,19 @@ export interface GovernedSnapshotCaptureLineageReadPortV1 {
     snapshotId: string
   ): Promise<GovernedSnapshotCommitLineageV1 | undefined>;
 }
+
+/**
+ * Direct, tenant-scoped successor lookup for correction terminality checks.
+ *
+ * Implementations must query the immutable correction index rather than scan
+ * keyset-paginated snapshot history. This prevents a correction inserted
+ * between pages with an identity at or before the current cursor from being
+ * omitted by a later terminality check.
+ */
+export interface DatasetSnapshotCorrectionReadPortV1 {
+  getDirectCorrection(
+    tenantId: string,
+    correctsSnapshotId: string,
+    correctsSnapshotHash: string
+  ): Promise<DatasetSnapshotV2 | undefined>;
+}

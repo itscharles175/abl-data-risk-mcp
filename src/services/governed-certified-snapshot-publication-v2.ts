@@ -27,6 +27,7 @@ import type { GovernedSnapshotCaptureLineageReadPortV1, GovernedSnapshotCommitLi
 import type { ImmutableRepositoryPort } from "../repositories/ports.js";
 import {
   GovernedDefinitionV2ResolverError,
+  sameGovernedDefinitionExecutionReferenceV2,
   type GovernedDefinitionExecutionReferenceV2,
   type GovernedDefinitionV2Resolver,
   type ResolvedGovernedDefinitionV2
@@ -218,6 +219,7 @@ export class GovernedCertifiedSnapshotPublicationV2Service {
       uri: input.storedArtifact.uri
     });
     const { sourceContract: _sourceContract, ...sourceDefinition } = input.evidence.governance.sourceContract.execution;
+    const sourceIdentity = input.evidence.governance.sourceContract.raw;
     return verifiedEvidence(() =>
       createCertifiedSnapshotPublicationV1({
         contractVersion: 1,
@@ -228,10 +230,10 @@ export class GovernedCertifiedSnapshotPublicationV2Service {
         datasetBinding: binding,
         sourceContract: {
           definition: sourceDefinition,
-          sourceContractId: source.sourceContractId,
+          sourceContractId: sourceIdentity.sourceContractId,
           sourceKey: source.sourceKey,
-          revision: source.revision,
-          sourceContractHash: source.sourceContractHash
+          revision: sourceIdentity.revision,
+          sourceContractHash: sourceIdentity.sourceContractHash
         },
         snapshot: {
           snapshotId: input.snapshot.snapshotId,
@@ -298,9 +300,8 @@ export class GovernedCertifiedSnapshotPublicationV2Service {
     }
     if (
       expected.kind !== expectedKind ||
-      canonicalJson(resolved.reference) !== canonicalJson(expected) ||
-      resolved.approvalEvidence.approvalEventHash !== expected.approvalEventHash ||
-      canonicalHash(resolved.executionDocument) !== expected.documentHash
+      !sameGovernedDefinitionExecutionReferenceV2(resolved.reference, expected) ||
+      resolved.approvalEvidence.approvalEventHash !== expected.approvalEventHash
     ) {
       mismatch("Frozen governed definition does not match V2 certification governance evidence");
     }
@@ -317,20 +318,22 @@ export class GovernedCertifiedSnapshotPublicationV2Service {
       readonly mappingDefinition: ResolvedGovernedDefinitionV2;
     }
   ): void {
-    const control = verifiedEvidence(() => parseSnapshotCertificationDefinitionV1(definitions.controlDefinition.executionDocument));
-    const source = verifiedEvidence(() => parseSourceContractV1(definitions.sourceContractDefinition.executionDocument));
-    const scope = verifiedEvidence(() => parseGovernedDatasetScopeBindingV1(definitions.scopeBindingDefinition.executionDocument));
-    const mapping = verifiedEvidence(() => parseMappingSpecV2(definitions.mappingDefinition.executionDocument));
+    const control = verifiedDefinition(() => parseSnapshotCertificationDefinitionV1(definitions.controlDefinition.executionDocument));
+    const source = verifiedDefinition(() => parseSourceContractV1(definitions.sourceContractDefinition.executionDocument));
+    const scope = verifiedDefinition(() => parseGovernedDatasetScopeBindingV1(definitions.scopeBindingDefinition.executionDocument));
+    const mapping = verifiedDefinition(() => parseMappingSpecV2(definitions.mappingDefinition.executionDocument));
     if (
       canonicalJson(control) !== canonicalJson(evidenceRecord.governance.control.definition) ||
-      canonicalJson({ sourceContractId: source.sourceContractId, revision: source.revision, sourceContractHash: source.sourceContractHash }) !== canonicalJson(evidenceRecord.governance.sourceContract.raw) ||
+      source.sourceContractId !== evidenceRecord.governance.sourceContract.raw.sourceContractId ||
+      source.revision !== evidenceRecord.governance.sourceContract.raw.revision ||
+      source.sourceKey !== definitions.sourceContractDefinition.reference.definitionKey ||
       canonicalJson(scope) !== canonicalJson(evidenceRecord.governance.scopeBinding.raw) ||
       source.tenantId !== evidenceRecord.tenantId ||
       scope.tenantId !== evidenceRecord.tenantId ||
       mapping.tenantId !== evidenceRecord.tenantId ||
       mapping.mappingSpecId !== evidenceRecord.governance.mapping.execution.mappingSpecId ||
       mapping.revision !== evidenceRecord.governance.mapping.execution.mappingSpecRevision ||
-      mapping.mappingSpecHash !== evidenceRecord.governance.mapping.execution.mappingSpecHash ||
+      mapping.mappingKey !== definitions.mappingDefinition.reference.definitionKey ||
       canonicalJson(mapping.sourceContract) !== canonicalJson(evidenceRecord.governance.sourceContract.raw) ||
       canonicalJson(source.delivery) !== canonicalJson(snapshot.delivery)
     ) {
@@ -439,6 +442,13 @@ function verifiedEvidence<T>(operation: () => T): T {
       "FROZEN_EVIDENCE_DRIFT",
       error instanceof Error ? `V2 publication evidence failed verification: ${error.message}` : "V2 publication evidence failed verification"
     );
+  }
+}
+
+function verifiedDefinition<T>(operation: () => T): T {
+  try { return operation(); } catch (error) {
+    if (error instanceof GovernedCertifiedSnapshotPublicationV2Error) throw error;
+    mismatch("Frozen governed definition failed validation against V2 certification evidence");
   }
 }
 

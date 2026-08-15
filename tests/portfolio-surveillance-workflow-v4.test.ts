@@ -44,6 +44,7 @@ import {
   type PortfolioSurveillanceSnapshotLoadRequestV1
 } from "../src/services/operations/portfolio-surveillance-v1.js";
 import {
+  PORTFOLIO_SURVEILLANCE_V4_WORKER_RESOURCE_LIMITS,
   PortfolioSurveillanceWorkflowV4,
   PortfolioSurveillanceWorkflowV4Error,
   type PortfolioSurveillanceWorkflowV4FaultPoint,
@@ -114,6 +115,18 @@ test("durable v4 workflow executes queued surveillance and reauthorizes exact re
   assert.equal(result.value.resultHash, canonicalHash(result.value.result));
   assert.equal(canonicalJson(result.value.result).includes("engineInput"), false);
   assert.equal(result.obligations.length, 2);
+  for (let read = 0; read < 3; read += 1) {
+    const repeatedStatus = await fixture.workflow.getPortfolioSurveillanceJobStatusAuthorized(
+      fixture.principal,
+      started.value.jobHandle
+    );
+    const repeatedResult = await fixture.workflow.getPortfolioSurveillanceJobResultAuthorized(
+      fixture.principal,
+      started.value.jobHandle
+    );
+    assert.equal(repeatedStatus.value.resultAvailable, true);
+    assert.equal(repeatedResult.value.resultHash, result.value.resultHash);
+  }
   assert.equal(fixture.workerCalls, 1);
   const state = fixture.state.list(TENANT).items[0]!;
   assert.equal(state.status, "completed");
@@ -125,6 +138,21 @@ test("durable v4 workflow executes queued surveillance and reauthorizes exact re
       .some((event) => event.eventType === "portfolio_surveillance_v4.completed")
   );
   fixture.close();
+});
+
+test("production surveillance worker resource limits are explicit, frozen, and bounded", () => {
+  assert.deepEqual(PORTFOLIO_SURVEILLANCE_V4_WORKER_RESOURCE_LIMITS, {
+    maxOldGenerationSizeMb: 256,
+    maxYoungGenerationSizeMb: 64,
+    stackSizeMb: 8
+  });
+  assert.equal(Object.isFrozen(PORTFOLIO_SURVEILLANCE_V4_WORKER_RESOURCE_LIMITS), true);
+  assert.throws(
+    () => Object.assign(PORTFOLIO_SURVEILLANCE_V4_WORKER_RESOURCE_LIMITS, {
+      maxOldGenerationSizeMb: 1_024
+    }),
+    TypeError
+  );
 });
 
 test("denial is audited before materialization and creates no queue or workflow state", async () => {

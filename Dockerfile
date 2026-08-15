@@ -37,6 +37,7 @@ ARG VERSION=0.1.0
 
 LABEL org.opencontainers.image.title="ABL Data & Risk MCP" \
       org.opencontainers.image.description="Governed ABL and loan-tape analytics MCP server" \
+      org.opencontainers.image.source="https://github.com/itscharles175/abl-data-risk-mcp" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${VERSION}" \

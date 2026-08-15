@@ -43,6 +43,8 @@ import type {
   GovernedWorkflowOperation,
   StartGovernedJobInput
 } from "./services/governed-workflow.js";
+import type { CompositeGovernedWorkflowApi } from "./services/composite-governed-workflow-router.js";
+import type { StartPortfolioSurveillanceJobV4Input } from "./services/portfolio-surveillance-workflow-v4.js";
 
 export type RemoteGovernedJobOperation =
   | GovernedWorkflowOperation
@@ -105,7 +107,7 @@ export interface GovernedWorkflowApi {
 export interface PortfolioSurveillanceWorkflowApi {
   startPortfolioSurveillanceAuthorized(
     principal: VerifiedPrincipalContext,
-    input: RemotePortfolioSurveillanceStartInput,
+    input: StartPortfolioSurveillanceJobV4Input,
     requestContext?: GovernedWorkflowMutationRequestContext
   ): GovernedWorkflowTransportResponse | Promise<GovernedWorkflowTransportResponse>;
 }
@@ -117,10 +119,12 @@ export interface RemoteServerServices {
   readonly policy: CompiledAuthorizationPolicy;
   readonly workflow: GovernedWorkflowApi;
   /**
-   * Capability by construction. Omit until the trusted publication authority,
-   * two-stage planner, and durable v4 workflow are fully composed.
+   * Capability by construction. When present, every legacy and v4 start plus
+   * every opaque-handle lifecycle call routes through this same composite.
+   * Omit until the trusted publication authority, two-stage planner, durable
+   * v4 workflow, and exact durable handle router are fully composed.
    */
-  readonly portfolioSurveillanceWorkflow?: PortfolioSurveillanceWorkflowApi;
+  readonly compositeJobWorkflow?: CompositeGovernedWorkflowApi;
   /** Additive Release 3 analyst workflows. Omit until a governed implementation is configured. */
   readonly analystWorkflow?: GovernedAnalystWorkflowApi;
 }
@@ -304,7 +308,8 @@ const ALERT_DISCLOSURE_FIELDS = ["metric_observations", "monitor_thresholds"] as
 
 export function buildRemoteServer(services: RemoteServerServices, context: McpRequestContext): McpServer {
   const principal = verifiedPrincipal(context);
-  const portfolioSurveillanceEnabled = services.portfolioSurveillanceWorkflow !== undefined;
+  const portfolioSurveillanceEnabled = services.compositeJobWorkflow !== undefined;
+  const routedJobWorkflow = services.compositeJobWorkflow ?? services.workflow;
   const governedJobOperations = Object.freeze([
     ...DEFAULT_REMOTE_GOVERNED_JOB_OPERATIONS,
     ...(portfolioSurveillanceEnabled ? (["portfolio_surveillance_v1"] as const) : [])
@@ -732,7 +737,7 @@ export function buildRemoteServer(services: RemoteServerServices, context: McpRe
                 portfolioSurveillanceStartInput(input),
                 requestContext
               )
-            : await services.workflow.startAuthorized(
+            : await routedJobWorkflow.startAuthorized(
                 principal,
                 legacyGovernedWorkflowStartInput(input),
                 requestContext
@@ -756,7 +761,7 @@ export function buildRemoteServer(services: RemoteServerServices, context: McpRe
     },
     async ({ job_handle }) =>
       guarded(async () => {
-        const authorized = await services.workflow.getJobStatusAuthorized(principal, job_handle);
+        const authorized = await routedJobWorkflow.getJobStatusAuthorized(principal, job_handle);
         return toolResult(
           { job: authorized.value },
           requiredResponseLimits(authorized.obligations),
@@ -777,7 +782,7 @@ export function buildRemoteServer(services: RemoteServerServices, context: McpRe
     },
     async ({ job_handle }) =>
       guarded(async () => {
-        const authorized = await services.workflow.getJobResultAuthorized(principal, job_handle);
+        const authorized = await routedJobWorkflow.getJobResultAuthorized(principal, job_handle);
         return toolResult(
           { result: authorized.value },
           requiredResponseLimits(authorized.obligations),
@@ -798,7 +803,7 @@ export function buildRemoteServer(services: RemoteServerServices, context: McpRe
     },
     async ({ job_handle }) =>
       guarded(async () => {
-        const authorized = await services.workflow.cancelJobAuthorized(
+        const authorized = await routedJobWorkflow.cancelJobAuthorized(
           principal,
           job_handle,
           { requestStartedAtMonotonicMs: requestStartedAt }
@@ -1261,10 +1266,15 @@ function legacyGovernedWorkflowStartInput(
 
 function portfolioSurveillanceStartInput(
   input: z.infer<typeof portfolioSurveillanceStartJobInputSchema>
-): RemotePortfolioSurveillanceStartInput {
+): StartPortfolioSurveillanceJobV4Input {
   return Object.freeze({
     operation: input.operation,
-    operationRequest: input.operation_request,
+    operationRequest: {
+      contractVersion: input.operation_request.contractVersion,
+      operation: input.operation_request.operation,
+      sources: input.operation_request.sources.map((source) => ({ ...source })),
+      definitionVersionIds: [...input.operation_request.definitionVersionIds]
+    },
     idempotencyKey: input.idempotency_key,
     purpose: input.purpose
   });
@@ -1273,10 +1283,10 @@ function portfolioSurveillanceStartInput(
 function requiredPortfolioSurveillanceWorkflow(
   services: RemoteServerServices
 ): PortfolioSurveillanceWorkflowApi {
-  if (!services.portfolioSurveillanceWorkflow) {
+  if (!services.compositeJobWorkflow) {
     throw new Error("Portfolio surveillance workflow is not configured");
   }
-  return services.portfolioSurveillanceWorkflow;
+  return services.compositeJobWorkflow;
 }
 
 function pageAfter<T>(

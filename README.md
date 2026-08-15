@@ -19,6 +19,8 @@
   <sub>Repository and MCP package: <strong>ABL Data &amp; Risk MCP</strong></sub>
 </p>
 
+> **Naming note:** Aegis Ledger is the public product identity. Existing package names (`abl-mcp-server`, `@abl/*`), executables, environment-variable prefixes, and protocol identifiers remain stable for compatibility.
+
 <p align="center">
   <a href="#why-this-exists">Why</a> ·
   <a href="#what-is-implemented">Capabilities</a> ·
@@ -30,7 +32,7 @@
 
 ## Why this exists
 
-> **Pilot release focus:** one facility, end to end—governed capture, certification, V2 publication, aggregate surveillance, correction/disable handling, and auditable results. Multi-facility analysis, ABL-v2, notifications, and production deployment remain deliberate follow-on releases.
+> **Pilot release focus:** one facility, end to end—governed capture, certification, V2 publication, aggregate surveillance, correction/disable handling, and auditable results. That vertical is composed and tested locally but remains production-disabled. Multi-facility analysis, ABL-v2, notifications, and live deployment remain deliberate follow-on releases.
 
 The product is deliberately narrower than “chat with SQL”:
 
@@ -47,13 +49,21 @@ Codex, Claude Code, Claude Desktop, and other products can use this server only 
 
 ## What is implemented
 
-The repository now contains an end-to-end governed production runtime, a separate local compatibility surface, and an operator-only control plane.
+The repository contains a governed runtime foundation, a locally composed single-facility pilot, a separate compatibility surface, and an operator-only control plane. It is not a deployed or production-certified service.
 
 | Surface | Entry point | Purpose |
 |---|---|---|
 | Governed remote MCP | `node dist/remote-cli.js` | OAuth/OIDC-authenticated Streamable HTTP over `/mcp`; tenant-scoped policy, certified snapshots, durable jobs, results, manifests, and alerts. |
 | Local MCP | `node dist/cli.js serve stdio --config ...` | Local STDIO compatibility and development against operator-allowlisted live SQLite/PostgreSQL sources. A loopback-only HTTP mode also exists for development. |
 | Operator control plane | `node dist/operator/main.js <command> --request <file>` | Strict, bounded administration for ingestion, SQL snapshot extraction, mappings, definitions, certification, memberships, alert transitions, and audit inspection. It is not an MCP tool surface. |
+
+| Capability | Repository status | Production boundary |
+|---|---|---|
+| Legacy governed MCP jobs | Implemented and deterministically tested | Requires an approved OAuth/OIDC environment, persistent configuration, and live acceptance |
+| Single-facility V2 surveillance pilot | Locally composed and covered end to end through capture → certify → publish → durable V4 result | Explicitly reports `productionEnabled: false` and `remoteAdvertised: false` |
+| V2 operator governance | IDs-only capture/certification plus delivery, runtime, publication, and audit command surfaces exist | Modern authority composition is injected; checked-in defaults fail closed when it is absent |
+| Console and BFF | Fixture review journeys plus an optional governed pilot job port | Default launch does not inject a live control API or pilot job service |
+| Multi-facility, ABL-v2, automation, notifications | Domain/conformance components exist at varying integration levels | Not an end-to-end deployed capability |
 
 Implemented foundations include:
 
@@ -68,7 +78,7 @@ Implemented foundations include:
 - a remote OAuth/OIDC resource server with exact issuer/audience/resource validation, server-side tenant membership, policy evaluation, Host/Origin controls, rate limits, concurrency limits, liveness, and readiness;
 - a hardened Dockerfile, Compose template, Kubernetes base, operator-run release checks, operations guide, and release checklist.
 
-The additive portfolio-platform upgrade also includes versioned source-contract, source-delivery, snapshot-v2, mapping-spec/application, dictionary-v2, certified-population, governed dataset/scope-binding, `SourceAccessPolicyV1`, lifecycle-governed FX-rate definition execution, and data-lineage-only `CertifiedSnapshotPublicationV1` contracts; IDs-only modern capture/certification services and operator schemas; immutable local snapshot/evidence, runtime, publication, and v4 workflow-state repositories; a repository-backed publication verifier; metadata-only portfolio authorization preflight; post-policy least-privilege materialization; standalone v4 governed-operation and dedicated durable-workflow primitives; deterministic portfolio-surveillance and multi-component ABL engines; governed investigation, disclosure-ledger, pipeline, notification, connector, report-signing, adapter-conformance, shared-persistence, and privacy-safe telemetry modules; and a React/TypeScript review console with an OIDC-capable BFF. These upgrade modules are at different integration levels. The exact code-versus-environment status and next integration blockers are tracked in [Upgrade Implementation Status](./docs/UPGRADE_IMPLEMENTATION.md) and [Upgrade Checkpoint](./docs/UPGRADE_CHECKPOINT.md).
+The additive portfolio-platform upgrade includes immutable V2 evidence and publication contracts, lifecycle-governed definitions, IDs-only modern capture/certification, durable V4 surveillance execution, a composite opaque-handle router, deterministic portfolio-surveillance and ABL engines, and conformance modules for investigations, reports, pipelines, notifications, connectors, shared persistence, and telemetry. These modules are intentionally at different integration levels. The exact code-versus-environment boundary is tracked in [Upgrade Implementation Status](./docs/UPGRADE_IMPLEMENTATION.md) and [Upgrade Checkpoint](./docs/UPGRADE_CHECKPOINT.md).
 
 There is no generic SQL tool, source-system write, raw-row MCP tool, arbitrary callback/recipient field, or autonomous credit decision.
 
@@ -102,20 +112,23 @@ The production server exposes 17 tools:
 
 `abl_start_job` supports `snapshot_stratification`, `snapshot_vintage`, `ar_borrowing_base`, and `monitoring`. Job and result access uses opaque handles bound to the verified principal. Mapping proposals never self-approve or self-activate.
 
-`portfolio_surveillance_v1` has a fail-closed conditional schema and separate delegation seam, but the production `remote-cli` does not inject its dedicated workflow. Production capabilities and `abl_start_job` therefore continue to expose only the four operations above. The repository-backed publication verifier, metadata-only preflight, post-policy materializer, dedicated v4 lifecycle, modern capture/certification writers with encrypted hash-bound captured source material, FX evidence store, and certification-artifact staging ledger are additive foundations, not production enablement. Do not expose the fifth operation until lifecycle-backed source/control/runtime/methodology/dimension/FX authorities, certified production adapters, durable runtime composition, and opaque-handle routing for status/result/cancel are implemented and reviewed.
+`portfolio_surveillance_v1` now has a local, production-disabled composition and a durable composite router that keeps start/status/result/cancel on the issuing workflow lane. The remote server accepts that router only through explicit dependency injection; the checked-in `remote-cli` does not inject it. Production capabilities therefore continue to expose only the four operations above. Do not enable the fifth operation until its remaining authority, adapter, environment, and release gates are approved.
 
 The local server exposes the original nine direct-source tools plus additive `abl_run_stratification_v2` and `abl_run_vintage_v2` previews. The v2 previews materialize a bounded allowlisted projection and invoke the same deterministic snapshot engines used by governed jobs. They remain local previews, not certification artifacts.
 
 ## Quick start
 
-Requirements: Node.js `>=22.13` and pnpm.
+Requirements: Node.js `>=22.13` and pnpm `11.16.0` (the version pinned by `packageManager`).
 
 ```sh
+git clone https://github.com/itscharles175/abl-data-risk-mcp.git
+cd abl-data-risk-mcp
 pnpm install --frozen-lockfile
 pnpm run verify
 pnpm run audit:prod
-pnpm run build
 ```
+
+`pnpm run verify` performs strict type checks, root and platform tests, and production builds. Integration, security, and release commands are separate because some gates require explicitly authorized external infrastructure.
 
 ### Local STDIO
 
@@ -192,7 +205,7 @@ node dist/operator/main.js extract-sql --request /secure/requests/extract.json
 node dist/operator/main.js certify-snapshot --request /secure/requests/certify.json
 ```
 
-Current commands are `ingest-file`, `extract-sql`, `extract-sql-v2`, `mapping-propose`, `mapping-transition`, `definition-propose`, `definition-transition`, `definition-v2-propose`, `definition-v2-transition`, `definition-v2-get`, `definition-v2-list`, `definition-v2-select-effective`, `definition-v2-audit-list`, `certify-snapshot`, `certify-snapshot-v2`, `put-input-artifact`, `input-certification-propose`, `input-certification-certify`, `membership-propose`, `membership-approve`, `membership-revoke`, `alerts-list`, `alert-transition`, and `audit-list`. The v2 capture request contains only source-contract and delivery IDs, and the v2 certification request contains only a snapshot ID; both derive actor and output identifiers at the trusted boundary and return redacted metadata. Their runtime ports are optional and unconfigured in the checked-in production runtime. The additive v2 definition commands govern source contracts, source-access policies, mappings, methodologies, borrowing-base policies, surveillance definitions, reports, scenarios, and covenants without mutating v1 records. Their responses are metadata-only: semantic diff paths, impact previews, lifecycle evidence, and integrity hashes are returned, while definition documents and transition evidence are never returned. `definition-v2-select-effective` also verifies the selected version through the durable lifecycle resolver before publishing its execution reference. Raw input artifacts remain inspectable but are not executable; borrowing-base and monitoring jobs require the maker/checker-certified artifact returned by the two input-certification commands and an explicit governed purpose.
+The command set covers legacy ingestion/extraction/certification, V2 definition governance, V2 source-delivery registration/disable/read/audit, historical bundle/runtime registration and activation, V2 publication/disable/read/audit, input certification, memberships, alerts, and audit inspection. Run `node dist/operator/main.js --help` for the authoritative list; command names are also frozen in `OPERATOR_COMMANDS` and contract-tested. The v2 capture request contains only source-contract and delivery IDs, and the v2 certification request contains only a snapshot ID; both derive actor and output identifiers at the trusted boundary and return redacted metadata. Their modern runtime is injected and absent from the checked-in default topology. V2 definition responses are metadata-only: semantic diff paths, impact previews, lifecycle evidence, and integrity hashes are returned, while definition documents and transition evidence are never returned. Raw input artifacts remain inspectable but are not executable; borrowing-base and monitoring jobs require maker/checker-certified artifacts and an explicit governed purpose.
 
 The local operator executable is a privileged global-administration boundary. It derives a stable, non-reversible principal ID from the operating-system account; request documents cannot choose actor, proposer, approver, delivery, certification, or transition identities. A `tenantId` in an operator request selects a governed resource—it is not authentication. The current identity design is approved only for one trusted host with distinct, non-reused authorized OS accounts; do not share its control storage across hosts or container UID namespaces. Cross-host administration requires a host- or IdP-bound trusted operator identity. Run maker and checker steps under distinct authorized OS accounts.
 
@@ -200,7 +213,7 @@ Trusted SQL snapshot extraction additionally uses `ABL_OPERATOR_SQL_POLICIES_FIL
 
 ### Review/admin console
 
-The workspace includes `apps/console`, `apps/bff`, and `apps/contracts`. For the explicitly labeled local fixture experience:
+The workspace includes `apps/console`, `apps/bff`, and `apps/contracts`. For the explicitly labeled local fixture experience, run the BFF and console in separate terminals:
 
 ```sh
 pnpm run dev:bff
@@ -208,6 +221,20 @@ pnpm run dev:console
 ```
 
 Production mode requires the BFF's OIDC Authorization Code + PKCE configuration, secure HTTP-only sessions, an approved control-API adapter, and TLS. The browser never calls MCP directly and must never receive service credentials. Until the tenant-aware control adapter and durable session backend are wired, the console is a reviewable fixture/conformance surface rather than a deployed administration plane.
+
+The pilot workflow panel is also fail closed: the default BFF process does not inject a governed job service, so the capability endpoint reports it unavailable. An authorized deployment must provide the tenant/facility-bound service implementation.
+
+### Supported code imports
+
+The root package is private, but its supported compiled subpaths make composition boundaries explicit inside approved workspaces:
+
+```ts
+import { DatasetSnapshotV2Schema } from "abl-mcp-server/contracts";
+import { SqliteJobHandleRouteCatalog } from "abl-mcp-server/repositories";
+import { composeProductionDisabledSingleFacilityV2SurveillanceRuntime } from "abl-mcp-server/services";
+```
+
+Only `./contracts`, `./repositories`, and `./services` are supported package subpaths. Other source files are internal and may change without compatibility guarantees. This is a composition contract, not an npm publication claim.
 
 ## Deterministic analytical semantics
 
@@ -226,7 +253,7 @@ Monitoring evaluates typed, effective-dated decimal or boolean thresholds only a
 - [deploy/kubernetes](./deploy/kubernetes) provides a one-replica `Recreate` base with ClusterIP service, persistent control/artifact storage, hardened security contexts, probes, and default-deny networking.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) defines the operator-run verification, deployment rendering/schema checks, IaC/secret/image scans, SBOM generation, and container smoke checks.
 
-These are reviewed templates and manual verification instructions, not evidence that a public environment has been deployed. This repository intentionally has GitHub Actions disabled.
+These are reviewed templates and manual verification instructions, not evidence that a public environment has been deployed. This repository intentionally contains no GitHub Actions workflows. Verification and promotion are performed by trusted operators from approved build environments.
 
 ## Verification
 
@@ -243,16 +270,16 @@ The fast suite covers protocol-era compatibility, local and authenticated HTTP b
 ## Honest limits
 
 - PostgreSQL snapshot extraction is implemented and adversarially tested with an injected fake pool, but this repository has not certified it against a live PostgreSQL environment.
-- The OCI image has been built, smoke-tested, SBOMed, and scanned locally, but no live cloud deployment, registry promotion/signing, TLS gateway, real IdP, or production restore exercise has been completed here.
+- The OCI image and deployment assets have operator-run build, smoke, SBOM, vulnerability, secret, IaC, and schema gates, but those gates must be rerun and bound to the exact release commit. No live cloud deployment, registry promotion/signing, TLS gateway, real IdP, or production restore exercise has been completed here.
 - Real Codex CLI exercised tool discovery and `abl_capabilities`; real Claude Code completed its MCP connection health check; the official SDK exercised both legacy and modern protocol eras. Claude Desktop and authenticated remote-client acceptance remain external release gates.
 - Recurring scheduling, delivery detection, and notification delivery are intentionally out of process. The runtime has a durable worker for queued jobs, not a calendar scheduler or message dispatcher.
 - The durable deployment base uses local SQLite control stores and encrypted filesystem artifacts, so it is one replica with `Recreate`; horizontal scale requires external transactional stores and distributed lease evidence.
 - Durable SQLite stores are greenfield/component-registry deployments. An arbitrary pre-registry database is not an approved in-place upgrade source; migrate it offline with an explicitly reviewed, backed-up migration plan (only the documented legacy alert metadata shape has automatic adoption).
 - Audit rows are append-only in the local control stores, but export to a separately administered WORM audit system is still an operational integration.
 - CSV, JSON, NDJSON, SQLite, and PostgreSQL snapshot extraction are implemented. Hardened XLSX, Parquet, and immutable object-storage preflight/conformance adapters are present, but their production decoder/provider implementations and live certification remain external gates. Snowflake, BigQuery, SQL Server, MySQL, and other adapters are not certified claims.
-- The portfolio console currently uses clearly labeled fixture data. Its OIDC-capable BFF and review journeys are implemented, but a live control API, durable session service, tenant-aware administration backend, and deployed IdP remain integration gates.
+- The portfolio console currently uses clearly labeled fixture data. Its OIDC-capable BFF, review journeys, and optional IDs-only pilot job API are implemented, but the default BFF injects neither a live control API nor the pilot workflow. Durable sessions, tenant-aware administration, and a deployed IdP remain integration gates.
 - The new surveillance, ABL-v2, pipeline, connector, shared PostgreSQL/S3, and analyst-tool modules are not all composed into the production remote runtime yet. They must not be represented as deployed capabilities until the checkpoint integration work is complete.
 - New borrowing-base and monitoring jobs require maker/checker-certified, purpose-bound population envelopes that are revalidated at submission and worker execution; monitoring observations must name the exact normalized population they describe. Raw legacy sidecars remain inspection-only. Facility-specific source crosswalks, derived metric-run evidence, and live customer population tie-outs remain production acceptance gates.
 - There is intentionally no arbitrary SQL, source write, or raw-row MCP tool.
 
-For deeper design and operating details, see [Architecture](./docs/ARCHITECTURE.md), [Security](./docs/SECURITY.md), [Product Blueprint](./docs/PRODUCT_BLUEPRINT.md), [Roadmap](./docs/ROADMAP.md), [Upgrade Implementation Status](./docs/UPGRADE_IMPLEMENTATION.md), [Upgrade Checkpoint](./docs/UPGRADE_CHECKPOINT.md), [Operator Verification](./docs/OPERATOR_VERIFICATION.md), [Operations](./docs/OPERATIONS.md), and the [Release Checklist](./docs/RELEASE_CHECKLIST.md).
+For deeper design and operating details, start with the [documentation index](./docs/README.md).

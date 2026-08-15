@@ -20,6 +20,7 @@ import { validateBorrowingBasePolicyV2 } from "../src/domain/abl-v2/engine.js";
 import {
   GovernedDefinitionV2Resolver,
   GovernedDefinitionV2ResolverError,
+  sameGovernedDefinitionExecutionReferenceV2,
   type GovernedDefinitionV2AuthorityPort
 } from "../src/services/governed-definition-v2-resolver.js";
 
@@ -27,6 +28,35 @@ const directories: string[] = [];
 
 afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+
+test("execution-reference equality compares exactly the seven attested base fields", () => {
+  const reference = {
+    definitionVersionId: "source-v1",
+    definitionKey: "loan-tape",
+    kind: "source_contract" as const,
+    semanticVersion: "1.0.0",
+    versionHash: canonicalHash("source-version"),
+    documentHash: canonicalHash("source-document"),
+    approvalEventHash: canonicalHash("source-approval")
+  };
+  const extended = {
+    ...reference,
+    sourceContract: {
+      sourceContractId: "loan-source-a",
+      revision: 1,
+      sourceContractHash: canonicalHash("source-contract")
+    }
+  };
+
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, extended), true);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, definitionVersionId: "source-v2" }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, definitionKey: "other-source" }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, kind: "mapping_spec" }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, semanticVersion: "2.0.0" }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, versionHash: canonicalHash("other-version") }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, documentHash: canonicalHash("other-document") }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, approvalEventHash: canonicalHash("other-approval") }), false);
 });
 
 test("resolver derives engine approval only from the durable lifecycle", () => {

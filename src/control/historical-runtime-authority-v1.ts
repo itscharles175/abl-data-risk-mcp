@@ -235,6 +235,19 @@ export interface HistoricalRuntimeAuthorityOptionsV1 {
   readonly busyTimeoutMs?: number;
 }
 
+export interface HistoricalRuntimeAuditEventV1 {
+  readonly tenantId: string;
+  readonly tenantSequence: number;
+  readonly eventId: string;
+  readonly eventType: "bundle_registered" | "runtime_registered" | "runtime_activated";
+  readonly subjectId: string;
+  readonly subjectHash: Sha256Hash;
+  readonly actorId: string;
+  readonly occurredAt: string;
+  readonly previousEventHash: Sha256Hash | null;
+  readonly eventHash: Sha256Hash;
+}
+
 interface BundleRow {
   readonly tenant_id: string;
   readonly bundle_kind: string;
@@ -503,6 +516,105 @@ export class SqliteHistoricalRuntimeAuthorityV1 {
       this.#writeReceipt(actor, "activate_runtime", idempotencyKey, requestHash, proof, now);
       return { value: proof, replayed: false };
     });
+  }
+
+  listAudit(
+    tenantIdValue: string,
+    afterTenantSequenceValue = 0,
+    limitValue = 100
+  ): readonly HistoricalRuntimeAuditEventV1[] {
+    this.#assertOpen();
+    const tenantId = identifier(tenantIdValue, "tenantId");
+    const afterTenantSequence = integer(
+      afterTenantSequenceValue,
+      "afterTenantSequence",
+      0,
+      Number.MAX_SAFE_INTEGER
+    );
+    const limit = integer(limitValue, "limit", 1, 1_000);
+    const rows = this.#database.prepare(
+      `SELECT * FROM historical_runtime_audit_v1
+       WHERE tenant_id = ? ORDER BY tenant_sequence`
+    ).all(tenantId) as unknown as readonly Record<string, unknown>[];
+    let previousEventHash: Sha256Hash | null = null;
+    let previousOccurredAt: string | null = null;
+    const events = rows.map((row, index) => {
+      const body = {
+        tenantId: String(row.tenant_id),
+        tenantSequence: Number(row.tenant_sequence),
+        eventId: String(row.event_id),
+        eventType: String(row.event_type) as HistoricalRuntimeAuditEventV1["eventType"],
+        subjectId: String(row.subject_id),
+        subjectHash: String(row.subject_hash) as Sha256Hash,
+        actorId: String(row.actor_id),
+        occurredAt: String(row.occurred_at),
+        previousEventHash:
+          row.previous_event_hash === null ? null : String(row.previous_event_hash) as Sha256Hash
+      };
+      const eventHash = String(row.event_hash) as Sha256Hash;
+      if (
+        body.tenantId !== tenantId ||
+        body.tenantSequence !== index + 1 ||
+        body.previousEventHash !== previousEventHash ||
+        (previousOccurredAt !== null && body.occurredAt < previousOccurredAt) ||
+        canonicalHash(body) !== eventHash
+      ) {
+        throw integrity("Historical runtime audit hash chain failed verification");
+      }
+      previousEventHash = eventHash;
+      previousOccurredAt = body.occurredAt;
+      return deepFreeze({ ...body, eventHash });
+    });
+    return Object.freeze(
+      events
+        .filter((event) => event.tenantSequence > afterTenantSequence)
+        .slice(0, limit)
+    );
+  }
+
+  resolveBundleReference(
+    tenantIdValue: string,
+    bundleKindValue: "dictionary",
+    bundleIdValue: string,
+    versionValue: string
+  ): DictionaryBundleReferenceV1;
+  resolveBundleReference(
+    tenantIdValue: string,
+    bundleKindValue: "mapping_compiler",
+    bundleIdValue: string,
+    versionValue: string
+  ): ImmutableBundleReferenceV1 & { readonly bundleKind: "mapping_compiler" };
+  resolveBundleReference(
+    tenantIdValue: string,
+    bundleKindValue: "methodology",
+    bundleIdValue: string,
+    versionValue: string
+  ): ImmutableBundleReferenceV1 & { readonly bundleKind: "methodology" };
+  resolveBundleReference(
+    tenantIdValue: string,
+    bundleKindValue: "field_policy",
+    bundleIdValue: string,
+    versionValue: string
+  ): ImmutableBundleReferenceV1 & { readonly bundleKind: "field_policy" };
+  resolveBundleReference(
+    tenantIdValue: string,
+    bundleKindValue: "dictionary" | "field_policy" | "mapping_compiler" | "methodology",
+    bundleIdValue: string,
+    versionValue: string
+  ): ImmutableBundleReferenceV1 | DictionaryBundleReferenceV1 {
+    this.#assertOpen();
+    const tenantId = identifier(tenantIdValue, "tenantId");
+    const bundleKind = bundleKindValue;
+    if (!(["dictionary", "field_policy", "mapping_compiler", "methodology"] as const).includes(bundleKind)) {
+      invalid("bundleKind is invalid");
+    }
+    const bundleId = identifier(bundleIdValue, "bundleId");
+    const version = identifier(versionValue, "version");
+    const row = this.#bundleByIdentity(tenantId, bundleKind, bundleId, version);
+    if (!row) notFound("Immutable historical bundle was not found");
+    const reference = this.#bundleReferenceFromRow(row);
+    this.#resolveBundle(tenantId, reference);
+    return reference;
   }
 
   forTenant(

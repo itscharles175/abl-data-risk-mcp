@@ -16,6 +16,7 @@ import type { MetricDefinitionV1 } from "../src/domain/surveillance/contracts.js
 import type { ResolvedGovernedDefinitionV2 } from "../src/services/governed-definition-v2-resolver.js";
 import { ArtifactStore, artifactJsonContentHash } from "../src/control/artifacts.js";
 import {
+  assertGovernedResultArtifactV4EvidenceMatchesEnvelope,
   assertGovernedResultArtifactV4MatchesEnvelope,
   assertGovernedResultManifestV4Creator,
   assertGovernedResultManifestV4MatchesResult,
@@ -431,6 +432,22 @@ testWithPlan("result rejects result/accounting hashes, duplicate disclosure sets
 testWithPlan("plan-bound finalization rejects raw-row, forged accounting, and authorization substitution", () => {
   const envelope = envelopeFixture();
   const authorization = executionAuthorizationFixture(envelope);
+  const forgedMetric = mutable(executePortfolioSurveillanceOperationV1(PLAN));
+  const aggregate = nested(forgedMetric, "aggregate");
+  const metrics = aggregate.metrics as Array<Record<string, unknown>>;
+  const cells = metrics[0]!.cells as Array<Record<string, unknown>>;
+  cells[0]!.value = "999999";
+  rehash(forgedMetric, "resultHash");
+  assert.throws(
+    () => finalizeGovernedResultArtifactV4(
+      resultSeed(forgedMetric),
+      envelope,
+      PLAN,
+      authorization
+    ),
+    ContractValidationError
+  );
+
   const operationResult = mutable(executePortfolioSurveillanceOperationV1(PLAN));
   operationResult.contractVersion = 999;
   operationResult.rawRecords = [{ loan_id: "raw-loan" }];
@@ -487,6 +504,32 @@ testWithPlan("plan-bound finalization rejects raw-row, forged accounting, and au
       ),
     ContractValidationError
   );
+});
+
+testWithPlan("finalization performs one deterministic replay and durable evidence checks do not rerun analytics", () => {
+  const envelope = envelopeFixture();
+  const authorization = executionAuthorizationFixture(envelope);
+  let deterministicReplayCount = 0;
+  const result = finalizeGovernedResultArtifactV4(
+    resultSeed(executePortfolioSurveillanceOperationV1(PLAN)),
+    envelope,
+    PLAN,
+    authorization,
+    { onDeterministicReplay: () => { deterministicReplayCount += 1; } }
+  );
+  assert.equal(deterministicReplayCount, 1);
+
+  for (let read = 0; read < 10; read += 1) {
+    assert.doesNotThrow(() =>
+      assertGovernedResultArtifactV4EvidenceMatchesEnvelope(
+        result,
+        envelope,
+        PLAN,
+        authorization
+      )
+    );
+  }
+  assert.equal(deterministicReplayCount, 1);
 });
 
 testWithPlan("frozen policy obligations and trusted execution timing fail closed", () => {

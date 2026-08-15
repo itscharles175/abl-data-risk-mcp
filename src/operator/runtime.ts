@@ -17,6 +17,7 @@ import { TenantMembershipStore } from "../security/membership-store.js";
 import { SnapshotIngestionService } from "../services/ingestion.js";
 import { InputCertificationService } from "../services/input-certification.js";
 import { GovernedDefinitionV2Resolver } from "../services/governed-definition-v2-resolver.js";
+import type { ModernSnapshotRuntimeV1 } from "../services/modern-snapshot-runtime-v1.js";
 import { TrustedPostgresSnapshotSource } from "../services/postgres-snapshot-source.js";
 import {
   SqlSnapshotExtractionService,
@@ -50,6 +51,21 @@ export class OperatorRuntimeError extends Error {
 export interface OperatorRuntime {
   readonly controlPlane: OperatorControlPlane;
   close(): Promise<void>;
+}
+
+/**
+ * Trusted host composition for the IDs-only modern snapshot commands. The
+ * modern runtime owns its durable authorities and lifecycle; this operator
+ * runtime only binds its already tenant-fenced ports to the local OS actor.
+ */
+export interface OperatorRuntimeOptions {
+  readonly modernSnapshotRuntime?: ModernSnapshotRuntimeV1;
+}
+
+export interface BoundOperatorModernSnapshotRuntime {
+  readonly principal: OperatorPrincipal;
+  readonly capture?: ModernSnapshotRuntimeV1["capture"];
+  readonly certification?: ModernSnapshotRuntimeV1["certification"];
 }
 
 const { Pool } = pg;
@@ -169,9 +185,11 @@ export function deriveLocalOperatorPrincipal(
  */
 export function createOperatorRuntime(
   environment: RuntimeEnvironment = process.env,
-  principal: OperatorPrincipal = deriveLocalOperatorPrincipal()
+  principal: OperatorPrincipal = deriveLocalOperatorPrincipal(),
+  options: OperatorRuntimeOptions = {}
 ): OperatorRuntime {
   const runtime = loadRuntimeConfiguration(environment);
+  const modern = bindOperatorModernSnapshotRuntime(principal, options.modernSnapshotRuntime);
   let keysReleased = false;
   const releaseArtifactKeys = (): void => {
     if (keysReleased) return;
@@ -216,7 +234,7 @@ export function createOperatorRuntime(
       environment
     );
     const controlPlane = new OperatorControlPlane({
-      principal,
+      principal: modern.principal,
       control: controlStore,
       definitions: definitionStore,
       governedDefinitionsV2: governedDefinitionV2Store,
@@ -226,7 +244,11 @@ export function createOperatorRuntime(
       alerts: alertStore,
       ingestion,
       inputCertification,
-      sqlExtractors: sqlRuntime.extractors
+      sqlExtractors: sqlRuntime.extractors,
+      ...(modern.capture === undefined ? {} : { modernSnapshotCapture: modern.capture }),
+      ...(modern.certification === undefined
+        ? {}
+        : { modernSnapshotCertification: modern.certification })
     });
     let closed = false;
     return {
@@ -259,6 +281,79 @@ export function createOperatorRuntime(
     releaseArtifactKeys();
     throw error;
   }
+}
+
+/**
+ * Binds a production-shaped modern snapshot runtime to exactly one trusted
+ * operator tenant. Request documents cannot select or override this tenant.
+ * Omitting the runtime preserves the legacy global-admin operator behavior.
+ */
+export function bindOperatorModernSnapshotRuntime(
+  principalValue: OperatorPrincipal,
+  runtime?: ModernSnapshotRuntimeV1
+): BoundOperatorModernSnapshotRuntime {
+  if (runtime === undefined) return Object.freeze({ principal: principalValue });
+  const principal = validateOperatorPrincipal(principalValue);
+  const tenantId = parseOperatorIdentifier(runtime.tenantId, "Modern snapshot tenant is invalid");
+  if (
+    !runtime.capture ||
+    typeof runtime.capture.capture !== "function" ||
+    !runtime.certification ||
+    typeof runtime.certification.certify !== "function"
+  ) {
+    throw new OperatorRuntimeError(
+      "INVALID_OPERATOR_CONFIGURATION",
+      "Modern snapshot runtime is incomplete"
+    );
+  }
+  if (principal.tenantId !== undefined && principal.tenantId !== tenantId) {
+    throw new OperatorRuntimeError(
+      "INVALID_OPERATOR_CONFIGURATION",
+      "Modern snapshot runtime tenant does not match the trusted operator binding"
+    );
+  }
+  return Object.freeze({
+    principal: Object.freeze({ ...principal, tenantId }),
+    capture: runtime.capture,
+    certification: runtime.certification
+  });
+}
+
+function validateOperatorPrincipal(value: OperatorPrincipal): OperatorPrincipal {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (value.authenticationMethod !== "local_os_account" &&
+      value.authenticationMethod !== "trusted_service_identity") ||
+    value.authorizationScope !== "global_admin"
+  ) {
+    throw new OperatorRuntimeError(
+      "INVALID_OPERATOR_CONFIGURATION",
+      "Trusted operator principal is invalid"
+    );
+  }
+  const principalId = parseOperatorIdentifier(
+    value.principalId,
+    "Trusted operator principal is invalid"
+  );
+  const tenantId = value.tenantId === undefined
+    ? undefined
+    : parseOperatorIdentifier(value.tenantId, "Trusted operator tenant is invalid");
+  return Object.freeze({
+    principalId,
+    ...(tenantId === undefined ? {} : { tenantId }),
+    authenticationMethod: value.authenticationMethod,
+    authorizationScope: value.authorizationScope
+  });
+}
+
+function parseOperatorIdentifier(value: unknown, message: string): string {
+  const parsed = operatorIdentifierSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new OperatorRuntimeError("INVALID_OPERATOR_CONFIGURATION", message);
+  }
+  return parsed.data;
 }
 
 interface SqlPolicySource {

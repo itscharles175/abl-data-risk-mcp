@@ -101,6 +101,10 @@ test("modern runtime rejects an incomplete production composition before it can 
       () => composeModernSnapshotRuntimeV1({ ...fixture.dependencies, tenantId: "invalid tenant" }),
       (error: unknown) => error instanceof ModernSnapshotRuntimeV1Error && error.code === "INVALID_CONFIGURATION"
     );
+    assert.throws(
+      () => composeModernSnapshotRuntimeV1({ ...fixture.dependencies, sourceMaterialMaximumBytes: 100_000_001 }),
+      (error: unknown) => error instanceof ModernSnapshotRuntimeV1Error && error.code === "INVALID_CONFIGURATION"
+    );
   } finally {
     fixture.close();
   }
@@ -111,7 +115,7 @@ function createFixture() {
   directories.push(directory);
   const artifacts = new ArtifactStore(join(directory, "artifacts"), {
     activeKeyId: "test-key", keys: { "test-key": Buffer.alloc(32, 7) }
-  });
+  }, { maximumArtifactBytes: 1_000_000 });
   const source = sourceContract();
   const binding = createGovernedDatasetScopeBindingV1({
     contractVersion: 1, tenantId: TENANT, bindingId: "facility-a-binding", revision: 1,
@@ -170,6 +174,7 @@ function createFixture() {
   const records = [{ assetNumber: "loan-1", actualEndBalance: "100", pool: "a", currency: "USD" }] as const;
   const dependencies: ModernSnapshotRuntimeV1Dependencies = {
     tenantId: TENANT, sourceDeliveries,
+    sourceMaterialMaximumBytes: 1_000_000,
     extraction: {
       async extract(input): Promise<TrustedModernSnapshotExtractionV1> {
         assert.equal(input.tenantId, TENANT);

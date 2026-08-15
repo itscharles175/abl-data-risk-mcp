@@ -8,6 +8,7 @@ import {
 } from "@abl/platform-contracts";
 
 export interface RiskPlatformAdapter {
+  readonly dataMode: "fixture" | "environment";
   getWorkbenchSection(section: SectionId): Promise<WorkbenchSectionPayload>;
   previewSourceContract(draft: SourceContractDraft): Promise<SourceContractPreview>;
 }
@@ -245,6 +246,7 @@ if (Object.keys(FIXTURES).length !== SECTION_IDS.length) {
 }
 
 export class FixtureRiskPlatformAdapter implements RiskPlatformAdapter {
+  public readonly dataMode = "fixture" as const;
   public async getWorkbenchSection(section: SectionId): Promise<WorkbenchSectionPayload> {
     return {
       section,

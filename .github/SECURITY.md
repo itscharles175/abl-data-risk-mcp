@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report suspected vulnerabilities privately through [GitHub Security Advisories](https://github.com/stag175/abl-data-risk-mcp/security/advisories/new). Do not include customer loan data, credentials, access tokens, database URLs, or production configuration.
+Please report suspected vulnerabilities privately through [GitHub Security Advisories](https://github.com/itscharles175/abl-data-risk-mcp/security/advisories/new). Do not include customer loan data, credentials, access tokens, database URLs, or production configuration.
 
 Include the affected commit or version, the trust boundary involved, a minimal reproduction using synthetic data, the expected impact, and any suggested containment. Please avoid public disclosure until the issue has been triaged and a coordinated resolution is available.
 

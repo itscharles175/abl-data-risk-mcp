@@ -131,6 +131,56 @@ test("dataset snapshot repository is tenant scoped, actor idempotent, paged, imm
   reopened.close();
 });
 
+test("direct correction lookup sees a concurrent low-key successor beyond a 1000-row page", async () => {
+  const path = databasePath();
+  const reader = new SqliteDatasetSnapshotV2Repository(path);
+  const writer = new SqliteDatasetSnapshotV2Repository(path);
+  for (let index = 0; index < 1_000; index += 1) {
+    const date = new Date(Date.UTC(2023, 0, index + 1)).toISOString().slice(0, 10);
+    const id = `m-filler-${String(index).padStart(4, "0")}`;
+    await writer.put(snapshot(id, date), context(id));
+  }
+  const original = snapshot("z-terminal-target", "2026-07-31");
+  await writer.put(original, context(original.snapshotId));
+
+  const firstPage = await reader.list("tenant-a", { limit: 1_000 });
+  assert.equal(firstPage.items.length, 1_000);
+  assert.ok(firstPage.nextCursor);
+
+  const correction = snapshot(
+    "a-concurrent-correction",
+    original.asOfDate,
+    {
+      kind: "correction",
+      correctsSnapshotId: original.snapshotId,
+      correctsSnapshotHash: original.snapshotHash,
+      correctionSequence: 1,
+      reasonCode: "concurrent_source_correction",
+      reason: "Correction inserted after the first terminality page",
+      detectedAt: "2026-08-02T00:00:00.000Z"
+    },
+    "2026-08-02T01:00:00.000Z"
+  );
+  await writer.put(correction, context(correction.snapshotId));
+
+  const continuation = await reader.list("tenant-a", {
+    cursor: firstPage.nextCursor ?? undefined
+  });
+  assert.equal(continuation.items.some((candidate) => candidate.snapshotId === correction.snapshotId), false);
+  assert.equal(
+    (await reader.getDirectCorrection("tenant-a", original.snapshotId, original.snapshotHash))
+      ?.snapshotId,
+    correction.snapshotId
+  );
+  assert.equal(
+    await reader.getDirectCorrection("tenant-b", original.snapshotId, original.snapshotHash),
+    undefined
+  );
+
+  writer.close();
+  reader.close();
+});
+
 test("correction lineage requires an exact contiguous, non-forking predecessor", async () => {
   const path = databasePath();
   const repository = new SqliteDatasetSnapshotV2Repository(path);
