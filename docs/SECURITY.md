@@ -218,7 +218,7 @@ The following are not completed evidence:
 
 - a live PostgreSQL role/RLS/precision/cancellation certification;
 - a real IdP/TLS gateway and cross-tenant staging deployment;
-- registry promotion, signing/provenance, target-architecture rebuilds, or a live Compose/Kubernetes/cloud deployment (the current working-tree image and manifests passed local build, runtime, SBOM, vulnerability, secret, IaC, and schema checks);
+- exact-commit OCI build/runtime, SBOM, vulnerability, secret, IaC, and schema evidence; registry promotion, signing/provenance, target-architecture rebuilds, and live Compose/Kubernetes/cloud deployment;
 - image signing/provenance/registry promotion;
 - application-consistent restore and measured RPO/RTO;
 - external WORM audit export;

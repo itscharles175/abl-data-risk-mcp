@@ -58,7 +58,7 @@ import { SecurityStateStoreError, type SecurityStateStore } from "../security/st
 import { MCP_SERVER_NAME, MCP_SERVER_VERSION } from "../product.js";
 import { modernMcpSuccessResultByteLength } from "../transports/mcp-result-envelope.js";
 import {
-  assertGovernedResultArtifactV4MatchesEnvelope,
+  assertGovernedResultArtifactV4EvidenceMatchesEnvelope,
   assertGovernedResultManifestV4Creator,
   assertGovernedResultManifestV4MatchesResult,
   createGovernedExecutionEnvelopeV4,
@@ -92,6 +92,12 @@ import type {
 const OPERATION = "portfolio_surveillance_v1" as const;
 const ANALYSIS_TOOL = "abl_run_portfolio_surveillance" as const;
 const JSON_MEDIA_TYPE = "application/json" as const;
+
+export const PORTFOLIO_SURVEILLANCE_V4_WORKER_RESOURCE_LIMITS = Object.freeze({
+  maxOldGenerationSizeMb: 256,
+  maxYoungGenerationSizeMb: 64,
+  stackSizeMb: 8
+});
 
 export interface StartPortfolioSurveillanceJobV4Input {
   readonly operation: typeof OPERATION;
@@ -994,7 +1000,7 @@ export class PortfolioSurveillanceWorkflowV4 {
     );
     const result = parseGovernedResultArtifactV4Structure(loadedResult.value);
     try {
-      assertGovernedResultArtifactV4MatchesEnvelope(
+      assertGovernedResultArtifactV4EvidenceMatchesEnvelope(
         result,
         envelope,
         plan,
@@ -1275,11 +1281,7 @@ export class PortfolioSurveillanceWorkflowV4 {
       );
       worker = new Worker(entry, {
         workerData: plan,
-        resourceLimits: {
-          maxOldGenerationSizeMb: 256,
-          maxYoungGenerationSizeMb: 64,
-          stackSizeMb: 8
-        }
+        resourceLimits: PORTFOLIO_SURVEILLANCE_V4_WORKER_RESOURCE_LIMITS
       });
       worker.once("message", (message: PortfolioSurveillanceWorkerMessageV4 | unknown) => {
         if (!message || typeof message !== "object" || Array.isArray(message)) {

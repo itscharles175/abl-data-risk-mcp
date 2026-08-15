@@ -13,20 +13,30 @@ const securityTests = rootTestFiles([
   /^analyst-mcp-tools\./,
   /^automation\./,
   /^certification-postgres\./,
+  /^composite-governed-workflow-router\./,
   /^container-entrypoint\./,
   /^data-quality-v2\./,
   /^disclosure-ledger\./,
   /^hybrid-connector\./,
+  /^governed-modern-extraction-authority-v1\./,
   /^investigations\./,
   /^mapping-v2-executor\./,
+  /^modern-snapshot-extraction-receipts-v1\./,
   /^observability-privacy\./,
   /^operation-registry\./,
+  /^operator-governance-commands\./,
+  /^operator-runtime-modern-v2\./,
+  /^pilot-vertical-acceptance\./,
   /^pipelines\./,
+  /^portfolio-surveillance-workflow-v4\./,
   /^remote-http\./,
   /^remote-server\./,
   /^security-/,
   /^shared-/,
-  /^sqlite-component-schema\./
+  /^single-facility-v2-surveillance-runtime\./,
+  /^sqlite-component-schema\./,
+  /^surveillance-production-authority-v2\./,
+  /^surveillance-publication-v2-read-adapter\./
 ]);
 
 await runVerificationSuite({

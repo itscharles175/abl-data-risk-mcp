@@ -1,0 +1,164 @@
+{
+  "schemaVersion": "synthetic_abs_auto_v1",
+  "fixtureId": "SYN-ABS-AUTO-001",
+  "generator": {
+    "name": "aegis-ledger-synthetic-abs-auto",
+    "version": "1.0.0",
+    "seed": "SYN-SEED-001"
+  },
+  "boundary": "This fixture is original synthetic test data created for Aegis Ledger. It contains no copied, sampled, transformed, perturbed, or statistically fitted borrower records, report values, dictionary prose, identifiers, hashes, or source-system metadata. Similarity is limited to public ABS-EE concepts and deliberately constructed control behaviors. It is not private case-study data, production data, certification evidence, or an authority for any real facility.",
+  "scope": {
+    "singleFacility": true,
+    "aggregateOnly": true,
+    "containsBorrowerRecords": false,
+    "containsSourceIdentifiers": false,
+    "importsSpreadsheetFormulas": false,
+    "authorizesRealFacilityCertification": false
+  },
+  "mappingLedgerColumns": [
+    "syntheticSourceField",
+    "semanticRole",
+    "syntheticTarget",
+    "matchClass",
+    "confidence",
+    "approvalStatus"
+  ],
+  "mappingLedger": [
+    ["source_field_01", "asset_identifier", null, "no_match", "high", "blocked_pending_definition"],
+    ["source_field_02", "reporting_period_end", "period_end", "semantic", "high", "proposed_needs_owner_review"],
+    ["source_field_03", "origination_month", "origination_date", "partial_transformed", "high", "proposed_needs_owner_review"],
+    ["source_field_04", "original_balance", "original_balance", "exact", "high", "proposed_auto_approve"],
+    ["source_field_05", "original_term_months", "original_term", "semantic", "high", "proposed_auto_approve"],
+    ["source_field_06", "maturity_month", "maturity_date", "partial_transformed", "high", "proposed_needs_owner_review"],
+    ["source_field_07", "original_rate", "rate_percent", "semantic", "medium", "blocked_pending_definition"],
+    ["source_field_08", "manufacturer", "manufacturer", "exact", "high", "proposed_needs_owner_review"],
+    ["source_field_09", "condition_code", "new_used_code", "semantic", "medium", "blocked_pending_definition"],
+    ["source_field_10", "model_year", "vehicle_year", "semantic", "high", "proposed_auto_approve"],
+    ["source_field_11", "collateral_value", null, "no_match", "high", "blocked_pending_definition"],
+    ["source_field_12", "credit_score", "credit_score", "semantic", "medium", "blocked_pending_definition"],
+    ["source_field_13", "payment_to_income", "payment_to_income_percent", "partial_transformed", "high", "proposed_auto_approve"],
+    ["source_field_14", "geography", "region", "semantic", "high", "proposed_needs_owner_review"],
+    ["source_field_15", "beginning_balance", "beginning_balance_new_field", "proposed_new_field", "high", "blocked_pending_definition"],
+    ["source_field_16", "current_rate", "current_rate_percent", "partial_transformed", "high", "proposed_needs_owner_review"],
+    ["source_field_17", "ending_balance", "principal_balance_candidate", "ambiguous", "medium", "proposed_needs_owner_review"],
+    ["source_field_18", "total_paid", "total_paid", "exact", "high", "proposed_auto_approve"],
+    ["source_field_19", "interest_collected", "interest_collected", "exact", "high", "proposed_auto_approve"],
+    ["source_field_20", "principal_collected", "principal_collected", "exact", "high", "proposed_auto_approve"],
+    ["source_field_21", "other_collected", "other_collected", "exact", "high", "proposed_needs_owner_review"],
+    ["source_field_22", "interest_paid_through", "interest_paid_through", "exact", "high", "proposed_needs_owner_review"],
+    ["source_field_23", "days_past_due", "days_past_due", "semantic", "high", "proposed_auto_approve"],
+    ["source_field_24", "repossession_flag", "repossession_flag", "semantic", "high", "proposed_needs_owner_review"],
+    ["source_field_25", "chargeoff_principal", "chargeoff_principal", "exact", "high", "blocked_pending_definition"]
+  ],
+  "semanticControls": {
+    "sourceIdentity": {
+      "syntheticIdPattern": "SYN-ASSET-[0-9]{6}",
+      "rawType": "integer_like_text",
+      "canonicalType": "text",
+      "canonicalIdentityRule": "preserve_verbatim_no_numeric_semantics",
+      "mappingAuthority": "blocked_pending_definition"
+    },
+    "datePrecision": {
+      "reportingPeriodEnd": "day",
+      "originationDate": "month",
+      "maturityDate": "month",
+      "inventedSourceDayPermitted": false
+    },
+    "creditScoreZero": {
+      "rawZeroCountAllReportedRows": 140,
+      "rawZeroCountActiveRows": 110,
+      "derivedTreatment": "unavailable",
+      "includeInScoreStatistics": false,
+      "policyStatus": "blocked_pending_definition"
+    },
+    "daysPastDue": {
+      "rawZeroMeaning": "current",
+      "rawValuePreserved": true,
+      "primaryMarketThresholds": [30, 60, 90, 120],
+      "alternateBucketLowerBounds": [31, 61, 91, 121]
+    },
+    "rawValueStates": {
+      "reportedDash": "reported_dash",
+      "blank": "blank",
+      "null": "null",
+      "zero": "zero",
+      "statesRemainDistinct": true,
+      "normalizationLayer": "derived_only"
+    }
+  },
+  "syntheticPoolControls": {
+    "reportedRecordCount": 1000,
+    "activePositiveBalanceCount": 920,
+    "terminatedZeroBalanceCount": 80,
+    "beginningBalanceUsd": "10000000.00",
+    "endingBalanceUsd": "9200000.00",
+    "originalPoolBalanceUsd": "20000000.00",
+    "weightedAverageCreditScore": "620.000000",
+    "scoredActiveCount": 810,
+    "scoredBalanceUsd": "8280000.00",
+    "weightedAverageCurrentRatePct": "15.250000",
+    "weightedAverageOriginalRatePct": "15.500000",
+    "weightedAveragePtiPct": "10.250000",
+    "weightedAverageOriginalTermMonths": "72.000000"
+  },
+  "syntheticDpdControls": [
+    {"threshold": "1+", "count": 180, "balanceUsd": "1800000.00"},
+    {"threshold": "30+", "count": 80, "balanceUsd": "800000.00"},
+    {"threshold": "60+", "count": 30, "balanceUsd": "300000.00"},
+    {"threshold": "90+", "count": 10, "balanceUsd": "100000.00"},
+    {"threshold": "120+", "count": 0, "balanceUsd": "0.00"}
+  ],
+  "designedVisibleExceptions": [
+    {
+      "exceptionId": "SYN-EXCEPTION-COUNT-006",
+      "control": "synthetic_ending_receivable_count",
+      "computed": "920",
+      "reported": "926",
+      "difference": "-6",
+      "tolerance": "0",
+      "status": "visible_exception",
+      "resolutionEvidence": "supplemental_status_feed_required"
+    },
+    {
+      "exceptionId": "SYN-EXCEPTION-BUCKET-002",
+      "control": "synthetic_strict_31_to_60_count",
+      "computed": "48",
+      "reported": "50",
+      "difference": "-2",
+      "tolerance": "0",
+      "status": "visible_exception",
+      "balanceComputedUsd": "480000.00",
+      "balanceReportedUsd": "480000.00"
+    }
+  ],
+  "unavailableWithoutSupplementalEvidence": [
+    "repurchases",
+    "liquidations",
+    "waterfall_allocations",
+    "reserve_movements",
+    "tranche_balances",
+    "undisclosed_adjustments"
+  ],
+  "syntheticVintageScenario": {
+    "scenarioId": "SYN-VINTAGE-001",
+    "periodStart": "2031-01-31",
+    "periodCount": 27,
+    "cohortCount": 400,
+    "initial": {
+      "reportedCount": 1000,
+      "activeCount": 390,
+      "currentBalanceUsd": "3900000.00",
+      "cumulativeGrossLossPct": "0.20",
+      "dpd30Pct": "2.10",
+      "poolFactor": "0.975"
+    },
+    "monthlyDelta": {
+      "reportedCount": -20,
+      "activeCount": -10,
+      "currentBalanceUsd": "-100000.00",
+      "cumulativeGrossLossPct": "0.20",
+      "dpd30Pct": "0.10",
+      "poolFactor": "-0.025"
+    }
+  }
+}

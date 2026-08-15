@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   IdentifierSchema,
+  Sha256HashSchema,
   canonicalHash,
   canonicalJson,
   parseDatasetSnapshotV2,
@@ -14,6 +15,13 @@ import {
   parseCertifiedSnapshotEvidenceRecordV1,
   type CertifiedSnapshotEvidenceRecordV1
 } from "../contracts/certified-snapshot-evidence-v1.js";
+import {
+  parseGovernedSnapshotCommitLineageV1,
+  type DatasetSnapshotCorrectionReadPortV1,
+  type GovernedDatasetSnapshotCommitRepositoryV1,
+  type GovernedSnapshotCaptureLineageReadPortV1,
+  type GovernedSnapshotCommitLineageV1
+} from "./governed-snapshot-commit.js";
 import { migrateSqliteComponent, type SqliteComponentMigration } from "../infrastructure/sqlite-component-schema.js";
 import type {
   ImmutableRepositoryPort,
@@ -26,7 +34,7 @@ import type {
 import { RepositoryError } from "./ports.js";
 
 export const SQLITE_SURVEILLANCE_EVIDENCE_COMPONENT = "abl.surveillance-evidence" as const;
-export const SQLITE_SURVEILLANCE_EVIDENCE_SCHEMA_VERSION = 1 as const;
+export const SQLITE_SURVEILLANCE_EVIDENCE_SCHEMA_VERSION = 2 as const;
 
 const SQLITE_SURVEILLANCE_EVIDENCE_SCHEMA = `
 CREATE TABLE surveillance_dataset_snapshots_v2 (
@@ -142,8 +150,87 @@ BEGIN
 END;
 `;
 
+const SQLITE_SURVEILLANCE_EVIDENCE_GOVERNED_CAPTURE_SCHEMA = `
+DROP INDEX surveillance_dataset_snapshots_v2_single_original;
+
+CREATE TABLE surveillance_dataset_snapshot_lineage_v1 (
+  tenant_id TEXT NOT NULL CHECK (length(tenant_id) BETWEEN 1 AND 128),
+  record_id TEXT NOT NULL CHECK (length(record_id) BETWEEN 1 AND 128),
+  record_hash TEXT NOT NULL CHECK (record_hash GLOB 'sha256:[0-9a-f]*' AND length(record_hash) = 71),
+  lineage_kind TEXT NOT NULL CHECK (lineage_kind IN ('legacy', 'governed_capture')),
+  population_key TEXT NOT NULL CHECK (length(population_key) BETWEEN 1 AND 256),
+  source_contract_id TEXT NOT NULL CHECK (length(source_contract_id) BETWEEN 1 AND 128),
+  source_contract_revision INTEGER NOT NULL CHECK (source_contract_revision > 0),
+  source_contract_hash TEXT NOT NULL CHECK (source_contract_hash GLOB 'sha256:[0-9a-f]*' AND length(source_contract_hash) = 71),
+  as_of_date TEXT NOT NULL CHECK (length(as_of_date) = 10),
+  correction_kind TEXT NOT NULL CHECK (correction_kind IN ('original', 'correction')),
+  dataset_id TEXT,
+  facility_id TEXT,
+  binding_id TEXT,
+  binding_revision INTEGER,
+  binding_hash TEXT,
+  delivery_id TEXT,
+  delivery_revision INTEGER,
+  delivery_hash TEXT,
+  receipt_id TEXT,
+  receipt_hash TEXT,
+  lineage_hash TEXT,
+  lineage_json TEXT CHECK (lineage_json IS NULL OR json_valid(lineage_json)),
+  PRIMARY KEY (tenant_id, record_id),
+  FOREIGN KEY (tenant_id, record_id)
+    REFERENCES surveillance_dataset_snapshots_v2 (tenant_id, record_id)
+    ON UPDATE RESTRICT ON DELETE RESTRICT,
+  CHECK (
+    (lineage_kind = 'legacy'
+      AND dataset_id IS NULL AND facility_id IS NULL
+      AND binding_id IS NULL AND binding_revision IS NULL AND binding_hash IS NULL
+      AND delivery_id IS NULL AND delivery_revision IS NULL AND delivery_hash IS NULL
+      AND receipt_id IS NULL AND receipt_hash IS NULL
+      AND lineage_hash IS NULL AND lineage_json IS NULL)
+    OR
+    (lineage_kind = 'governed_capture'
+      AND dataset_id IS NOT NULL AND facility_id IS NOT NULL
+      AND binding_id IS NOT NULL AND binding_revision > 0 AND binding_hash IS NOT NULL
+      AND delivery_id IS NOT NULL AND delivery_revision > 0 AND delivery_hash IS NOT NULL
+      AND receipt_id IS NOT NULL AND receipt_hash IS NOT NULL
+      AND lineage_hash IS NOT NULL AND lineage_json IS NOT NULL)
+  )
+) STRICT;
+
+INSERT INTO surveillance_dataset_snapshot_lineage_v1 (
+  tenant_id, record_id, record_hash, lineage_kind, population_key,
+  source_contract_id, source_contract_revision, source_contract_hash,
+  as_of_date, correction_kind
+)
+SELECT
+  tenant_id, record_id, record_hash, 'legacy', source_contract_hash,
+  source_contract_id, source_contract_revision, source_contract_hash,
+  as_of_date, correction_kind
+FROM surveillance_dataset_snapshots_v2;
+
+CREATE UNIQUE INDEX surveillance_dataset_snapshot_lineage_v1_single_original
+  ON surveillance_dataset_snapshot_lineage_v1 (tenant_id, population_key, as_of_date)
+  WHERE correction_kind = 'original';
+
+CREATE INDEX surveillance_dataset_snapshot_lineage_v1_delivery
+  ON surveillance_dataset_snapshot_lineage_v1 (tenant_id, delivery_id, delivery_revision);
+
+CREATE TRIGGER surveillance_dataset_snapshot_lineage_v1_no_update
+BEFORE UPDATE ON surveillance_dataset_snapshot_lineage_v1
+BEGIN
+  SELECT RAISE(ABORT, 'surveillance dataset snapshot lineage is immutable');
+END;
+
+CREATE TRIGGER surveillance_dataset_snapshot_lineage_v1_no_delete
+BEFORE DELETE ON surveillance_dataset_snapshot_lineage_v1
+BEGIN
+  SELECT RAISE(ABORT, 'surveillance dataset snapshot lineage is immutable');
+END;
+`;
+
 export const SQLITE_SURVEILLANCE_EVIDENCE_MIGRATIONS = Object.freeze([
-  { version: 1, sql: SQLITE_SURVEILLANCE_EVIDENCE_SCHEMA }
+  { version: 1, sql: SQLITE_SURVEILLANCE_EVIDENCE_SCHEMA },
+  { version: 2, sql: SQLITE_SURVEILLANCE_EVIDENCE_GOVERNED_CAPTURE_SCHEMA }
 ] as const satisfies readonly SqliteComponentMigration[]);
 
 export interface SqliteSurveillanceRepositoryOptions {
@@ -157,6 +244,31 @@ interface StoredRecordRow {
   readonly record_id: string;
   readonly record_hash: string;
   readonly record_json: string;
+}
+
+interface SnapshotLineageRow {
+  readonly tenant_id: string;
+  readonly record_id: string;
+  readonly record_hash: string;
+  readonly lineage_kind: "legacy" | "governed_capture";
+  readonly population_key: string;
+  readonly source_contract_id: string;
+  readonly source_contract_revision: number;
+  readonly source_contract_hash: string;
+  readonly as_of_date: string;
+  readonly correction_kind: "original" | "correction";
+  readonly dataset_id: string | null;
+  readonly facility_id: string | null;
+  readonly binding_id: string | null;
+  readonly binding_revision: number | null;
+  readonly binding_hash: string | null;
+  readonly delivery_id: string | null;
+  readonly delivery_revision: number | null;
+  readonly delivery_hash: string | null;
+  readonly receipt_id: string | null;
+  readonly receipt_hash: string | null;
+  readonly lineage_hash: string | null;
+  readonly lineage_json: string | null;
 }
 
 interface ReceiptRow {
@@ -179,9 +291,19 @@ interface ImmutableSqliteConfiguration<T extends TenantRecord> {
   readonly recordHash: (record: T) => Sha256Hash;
   readonly recordTime: (record: T) => string;
   readonly parse: (value: unknown) => T;
-  readonly assertRow: (record: T, row: StoredRecordRow & Record<string, unknown>) => void;
+  readonly assertRow: (
+    database: DatabaseSync,
+    record: T,
+    row: StoredRecordRow & Record<string, unknown>
+  ) => void;
   readonly beforeInsert: (database: DatabaseSync, record: T) => void;
   readonly insert: (database: DatabaseSync, record: T, json: string) => void;
+  readonly afterInsert: (database: DatabaseSync, record: T) => void;
+}
+
+interface AtomicCompanionWrite<T> {
+  readonly afterInsert: (database: DatabaseSync, record: T) => void;
+  readonly assertReplay: (database: DatabaseSync, record: T) => void;
 }
 
 abstract class SqliteImmutableSurveillanceRepository<T extends TenantRecord>
@@ -223,6 +345,22 @@ abstract class SqliteImmutableSurveillanceRepository<T extends TenantRecord>
   }
 
   async put(recordValue: T, contextValue: RepositoryWriteContext): Promise<RepositoryPutResult<T>> {
+    return this.#put(recordValue, contextValue);
+  }
+
+  protected async putWithAtomicCompanion(
+    recordValue: T,
+    contextValue: RepositoryWriteContext,
+    companion: AtomicCompanionWrite<T>
+  ): Promise<RepositoryPutResult<T>> {
+    return this.#put(recordValue, contextValue, companion);
+  }
+
+  async #put(
+    recordValue: T,
+    contextValue: RepositoryWriteContext,
+    companion?: AtomicCompanionWrite<T>
+  ): Promise<RepositoryPutResult<T>> {
     this.#assertOpen();
     let record: T;
     try {
@@ -270,6 +408,7 @@ abstract class SqliteImmutableSurveillanceRepository<T extends TenantRecord>
             "Idempotency receipt does not resolve to an immutable record"
           );
         }
+        companion?.assertReplay(this.#database, replay);
         this.#database.exec("COMMIT");
         return Object.freeze({ record: replay, replayed: true });
       }
@@ -279,6 +418,11 @@ abstract class SqliteImmutableSurveillanceRepository<T extends TenantRecord>
       this.#configuration.beforeInsert(this.#database, record);
       try {
         this.#configuration.insert(this.#database, record, json);
+        if (companion === undefined) {
+          this.#configuration.afterInsert(this.#database, record);
+        } else {
+          companion.afterInsert(this.#database, record);
+        }
       } catch (error) {
         throw mapConstraint(error);
       }
@@ -305,7 +449,7 @@ abstract class SqliteImmutableSurveillanceRepository<T extends TenantRecord>
       return Object.freeze({ record: stored, replayed: false });
     } catch (error) {
       rollback(this.#database);
-      throw error;
+      throw error instanceof RepositoryError ? error : mapConstraint(error);
     }
   }
 
@@ -387,7 +531,7 @@ abstract class SqliteImmutableSurveillanceRepository<T extends TenantRecord>
           "Stored surveillance index columns do not match canonical content"
         );
       }
-      this.#configuration.assertRow(parsed, row);
+      this.#configuration.assertRow(this.#database, parsed, row);
       return parsed;
     } catch (error) {
       if (error instanceof RepositoryError) throw error;
@@ -398,11 +542,113 @@ abstract class SqliteImmutableSurveillanceRepository<T extends TenantRecord>
   #assertOpen(): void {
     if (this.#closed) throw new RepositoryError("INVALID_ARGUMENT", "Repository is closed");
   }
+
+  /**
+   * Subclasses may use the connection only after independently reading their
+   * immutable record through `get`, which performs the full canonical
+   * record/index validation path.  The connection is deliberately not
+   * exposed outside repository subclasses.
+   */
+  protected verifiedReadDatabase(): DatabaseSync {
+    this.#assertOpen();
+    return this.#database;
+  }
 }
 
-export class SqliteDatasetSnapshotV2Repository extends SqliteImmutableSurveillanceRepository<DatasetSnapshotV2> {
+export class SqliteDatasetSnapshotV2Repository
+  extends SqliteImmutableSurveillanceRepository<DatasetSnapshotV2>
+  implements
+    GovernedDatasetSnapshotCommitRepositoryV1,
+    GovernedSnapshotCaptureLineageReadPortV1,
+    DatasetSnapshotCorrectionReadPortV1
+{
   constructor(databasePath: string, options: SqliteSurveillanceRepositoryOptions = {}) {
     super(databasePath, datasetSnapshotConfiguration(), options);
+  }
+
+  async commitGovernedCapture(
+    snapshot: DatasetSnapshotV2,
+    lineageValue: GovernedSnapshotCommitLineageV1,
+    context: RepositoryWriteContext
+  ): Promise<RepositoryPutResult<DatasetSnapshotV2>> {
+    const lineage = parseGovernedSnapshotCommitLineageV1(lineageValue);
+    assertGovernedLineageMatchesSnapshot(snapshot, lineage);
+    return this.putWithAtomicCompanion(snapshot, context, {
+      afterInsert: (database, stored) => insertGovernedSnapshotLineage(database, stored, lineage),
+      assertReplay: (database, stored) => assertExactGovernedSnapshotLineage(database, stored, lineage)
+    });
+  }
+
+  async getGovernedCaptureLineage(
+    tenantIdValue: string,
+    snapshotIdValue: string
+  ): Promise<GovernedSnapshotCommitLineageV1 | undefined> {
+    const tenantId = identifier(tenantIdValue, "tenant id");
+    const snapshotId = identifier(snapshotIdValue, "snapshot id");
+    const snapshot = await this.get(tenantId, snapshotId);
+    if (!snapshot) return undefined;
+
+    const database = this.verifiedReadDatabase();
+    // `get` has already verified the snapshot record, all snapshot indexes,
+    // and its lineage. Re-run the lineage verifier before returning the
+    // parsed payload so this read cannot be weakened by a future change to
+    // the generic repository read path.
+    verifyStoredSnapshotLineage(database, snapshot);
+    const row = readSnapshotLineage(database, tenantId, snapshotId);
+    if (!row) {
+      throw new RepositoryError("INTEGRITY_FAILURE", "Dataset snapshot is missing its atomic lineage row");
+    }
+    if (row.lineage_kind === "legacy") return undefined;
+    if (!row.lineage_json) {
+      throw new RepositoryError("INTEGRITY_FAILURE", "Governed dataset snapshot lineage is incomplete");
+    }
+    try {
+      return parseGovernedSnapshotCommitLineageV1(JSON.parse(row.lineage_json) as unknown);
+    } catch (error) {
+      if (error instanceof RepositoryError) throw error;
+      throw integrity("Stored governed snapshot lineage failed integrity verification", error);
+    }
+  }
+
+  async getDirectCorrection(
+    tenantIdValue: string,
+    correctsSnapshotIdValue: string,
+    correctsSnapshotHashValue: string
+  ): Promise<DatasetSnapshotV2 | undefined> {
+    const tenantId = identifier(tenantIdValue, "tenant id");
+    const correctsSnapshotId = identifier(correctsSnapshotIdValue, "corrected snapshot id");
+    const parsedHash = Sha256HashSchema.safeParse(correctsSnapshotHashValue);
+    if (!parsedHash.success) {
+      throw new RepositoryError("INVALID_ARGUMENT", "corrected snapshot hash is invalid");
+    }
+    const correctsSnapshotHash = parsedHash.data;
+    const row = this.verifiedReadDatabase()
+      .prepare(
+        `SELECT record_id FROM surveillance_dataset_snapshots_v2
+          WHERE tenant_id = ?
+            AND corrects_snapshot_id = ?
+            AND corrects_snapshot_hash = ?`
+      )
+      .get(tenantId, correctsSnapshotId, correctsSnapshotHash) as
+      | { readonly record_id: string }
+      | undefined;
+    if (!row) return undefined;
+
+    // Reload through the canonical repository read path so indexed successor
+    // columns cannot substitute malformed or cross-tenant record content.
+    const correction = await this.get(tenantId, row.record_id);
+    if (
+      !correction ||
+      correction.correction.kind !== "correction" ||
+      correction.correction.correctsSnapshotId !== correctsSnapshotId ||
+      correction.correction.correctsSnapshotHash !== correctsSnapshotHash
+    ) {
+      throw new RepositoryError(
+        "INTEGRITY_FAILURE",
+        "Direct correction index did not resolve its exact immutable successor"
+      );
+    }
+    return correction;
   }
 }
 
@@ -450,7 +696,7 @@ function datasetSnapshotConfiguration(): ImmutableSqliteConfiguration<DatasetSna
     recordHash: (record) => record.snapshotHash,
     recordTime: (record) => record.knowledge.persistedAt,
     parse: parsePersistableDatasetSnapshot,
-    assertRow: (record, row) => {
+    assertRow: (database, record, row) => {
       const correction = record.correction;
       const indexed = {
         sourceContractId: row.source_contract_id,
@@ -477,6 +723,7 @@ function datasetSnapshotConfiguration(): ImmutableSqliteConfiguration<DatasetSna
       if (canonicalJson(indexed) !== canonicalJson(expected)) {
         throw new RepositoryError("INTEGRITY_FAILURE", "Dataset snapshot indexes do not match its contract");
       }
+      verifyStoredSnapshotLineage(database, record);
     },
     beforeInsert: validateCorrectionLineage,
     insert: (database, record, json) => {
@@ -505,7 +752,8 @@ function datasetSnapshotConfiguration(): ImmutableSqliteConfiguration<DatasetSna
           record.knowledge.persistedAt,
           json
         );
-    }
+    },
+    afterInsert: insertLegacySnapshotLineage
   };
 }
 
@@ -517,7 +765,7 @@ function certifiedEvidenceConfiguration(): ImmutableSqliteConfiguration<Certifie
     recordHash: (record) => record.evidenceHash,
     recordTime: (record) => record.recordedAt,
     parse: parseCertifiedSnapshotEvidenceRecordV1,
-    assertRow: (record, row) => {
+    assertRow: (_database, record, row) => {
       const indexed = {
         snapshotId: row.snapshot_id,
         snapshotHash: row.snapshot_hash,
@@ -577,8 +825,230 @@ function certifiedEvidenceConfiguration(): ImmutableSqliteConfiguration<Certifie
           record.certification.certifiedAt,
           json
         );
-    }
+    },
+    afterInsert: () => undefined
   };
+}
+
+function snapshotPopulationKey(
+  lineageKind: "legacy" | "governed_capture",
+  sourceContractHash: string,
+  bindingHash?: string,
+  datasetId?: string,
+  facilityId?: string
+): string {
+  return lineageKind === "legacy"
+    ? sourceContractHash
+    : canonicalHash({
+        sourceContractHash,
+        bindingHash,
+        datasetId,
+        facilityId
+      });
+}
+
+function assertGovernedLineageMatchesSnapshot(
+  snapshotValue: DatasetSnapshotV2,
+  lineage: GovernedSnapshotCommitLineageV1
+): void {
+  const snapshot = parsePersistableDatasetSnapshot(snapshotValue);
+  if (
+    lineage.tenantId !== snapshot.tenantId ||
+    lineage.snapshotId !== snapshot.snapshotId ||
+    lineage.snapshotHash !== snapshot.snapshotHash ||
+    lineage.asOfDate !== snapshot.asOfDate ||
+    canonicalJson(lineage.sourceContract) !== canonicalJson(snapshot.sourceContract) ||
+    lineage.extractionReceipt.receiptHash !== snapshot.hashes.extractionHash
+  ) {
+    throw new RepositoryError(
+      "INTEGRITY_FAILURE",
+      "Governed capture lineage does not match the exact dataset snapshot"
+    );
+  }
+}
+
+function insertLegacySnapshotLineage(database: DatabaseSync, snapshot: DatasetSnapshotV2): void {
+  database
+    .prepare(
+      `INSERT INTO surveillance_dataset_snapshot_lineage_v1 (
+         tenant_id, record_id, record_hash, lineage_kind, population_key,
+         source_contract_id, source_contract_revision, source_contract_hash,
+         as_of_date, correction_kind
+       ) VALUES (?, ?, ?, 'legacy', ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      snapshot.tenantId,
+      snapshot.snapshotId,
+      snapshot.snapshotHash,
+      snapshotPopulationKey("legacy", snapshot.sourceContract.sourceContractHash),
+      snapshot.sourceContract.sourceContractId,
+      snapshot.sourceContract.revision,
+      snapshot.sourceContract.sourceContractHash,
+      snapshot.asOfDate,
+      snapshot.correction.kind
+    );
+}
+
+function insertGovernedSnapshotLineage(
+  database: DatabaseSync,
+  snapshot: DatasetSnapshotV2,
+  lineage: GovernedSnapshotCommitLineageV1
+): void {
+  assertGovernedLineageMatchesSnapshot(snapshot, lineage);
+  const populationKey = snapshotPopulationKey(
+    "governed_capture",
+    lineage.sourceContract.sourceContractHash,
+    lineage.scopeBinding.bindingHash,
+    lineage.datasetId,
+    lineage.facilityId
+  );
+  if (snapshot.correction.kind === "correction") {
+    const predecessorLineage = readSnapshotLineage(
+      database,
+      snapshot.tenantId,
+      snapshot.correction.correctsSnapshotId
+    );
+    if (!predecessorLineage || predecessorLineage.population_key !== populationKey) {
+      throw new RepositoryError(
+        "INTEGRITY_FAILURE",
+        "Correction crossed a governed dataset/facility/scope-binding population"
+      );
+    }
+  }
+  database
+    .prepare(
+      `INSERT INTO surveillance_dataset_snapshot_lineage_v1 (
+         tenant_id, record_id, record_hash, lineage_kind, population_key,
+         source_contract_id, source_contract_revision, source_contract_hash,
+         as_of_date, correction_kind, dataset_id, facility_id, binding_id,
+         binding_revision, binding_hash, delivery_id, delivery_revision,
+         delivery_hash, receipt_id, receipt_hash, lineage_hash, lineage_json
+       ) VALUES (?, ?, ?, 'governed_capture', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      snapshot.tenantId,
+      snapshot.snapshotId,
+      snapshot.snapshotHash,
+      populationKey,
+      lineage.sourceContract.sourceContractId,
+      lineage.sourceContract.revision,
+      lineage.sourceContract.sourceContractHash,
+      lineage.asOfDate,
+      snapshot.correction.kind,
+      lineage.datasetId,
+      lineage.facilityId,
+      lineage.scopeBinding.bindingId,
+      lineage.scopeBinding.revision,
+      lineage.scopeBinding.bindingHash,
+      lineage.sourceDelivery.deliveryId,
+      lineage.sourceDelivery.deliveryRevision,
+      lineage.sourceDelivery.deliveryHash,
+      lineage.extractionReceipt.receiptId,
+      lineage.extractionReceipt.receiptHash,
+      lineage.lineageHash,
+      canonicalJson(lineage)
+    );
+}
+
+function readSnapshotLineage(
+  database: DatabaseSync,
+  tenantId: string,
+  snapshotId: string
+): SnapshotLineageRow | undefined {
+  return database
+    .prepare(
+      `SELECT * FROM surveillance_dataset_snapshot_lineage_v1
+        WHERE tenant_id = ? AND record_id = ?`
+    )
+    .get(tenantId, snapshotId) as SnapshotLineageRow | undefined;
+}
+
+function verifyStoredSnapshotLineage(database: DatabaseSync, snapshot: DatasetSnapshotV2): void {
+  const row = readSnapshotLineage(database, snapshot.tenantId, snapshot.snapshotId);
+  if (!row) {
+    throw new RepositoryError("INTEGRITY_FAILURE", "Dataset snapshot is missing its atomic lineage row");
+  }
+  if (
+    row.record_hash !== snapshot.snapshotHash ||
+    row.source_contract_id !== snapshot.sourceContract.sourceContractId ||
+    row.source_contract_revision !== snapshot.sourceContract.revision ||
+    row.source_contract_hash !== snapshot.sourceContract.sourceContractHash ||
+    row.as_of_date !== snapshot.asOfDate ||
+    row.correction_kind !== snapshot.correction.kind
+  ) {
+    throw new RepositoryError("INTEGRITY_FAILURE", "Dataset snapshot lineage indexes were substituted");
+  }
+  if (row.lineage_kind === "legacy") {
+    if (
+      row.population_key !== snapshotPopulationKey("legacy", snapshot.sourceContract.sourceContractHash) ||
+      row.lineage_json !== null ||
+      row.lineage_hash !== null
+    ) {
+      throw new RepositoryError("INTEGRITY_FAILURE", "Legacy dataset snapshot lineage is invalid");
+    }
+    return;
+  }
+  if (!row.lineage_json || !row.lineage_hash) {
+    throw new RepositoryError("INTEGRITY_FAILURE", "Governed dataset snapshot lineage is incomplete");
+  }
+  const raw = JSON.parse(row.lineage_json) as unknown;
+  if (canonicalJson(raw) !== row.lineage_json) {
+    throw new RepositoryError("INTEGRITY_FAILURE", "Governed snapshot lineage JSON is not canonical");
+  }
+  const lineage = parseGovernedSnapshotCommitLineageV1(raw);
+  assertGovernedLineageMatchesSnapshot(snapshot, lineage);
+  const expectedColumns = {
+    populationKey: snapshotPopulationKey(
+      "governed_capture",
+      lineage.sourceContract.sourceContractHash,
+      lineage.scopeBinding.bindingHash,
+      lineage.datasetId,
+      lineage.facilityId
+    ),
+    datasetId: lineage.datasetId,
+    facilityId: lineage.facilityId,
+    bindingId: lineage.scopeBinding.bindingId,
+    bindingRevision: lineage.scopeBinding.revision,
+    bindingHash: lineage.scopeBinding.bindingHash,
+    deliveryId: lineage.sourceDelivery.deliveryId,
+    deliveryRevision: lineage.sourceDelivery.deliveryRevision,
+    deliveryHash: lineage.sourceDelivery.deliveryHash,
+    receiptId: lineage.extractionReceipt.receiptId,
+    receiptHash: lineage.extractionReceipt.receiptHash,
+    lineageHash: lineage.lineageHash
+  };
+  const actualColumns = {
+    populationKey: row.population_key,
+    datasetId: row.dataset_id,
+    facilityId: row.facility_id,
+    bindingId: row.binding_id,
+    bindingRevision: row.binding_revision,
+    bindingHash: row.binding_hash,
+    deliveryId: row.delivery_id,
+    deliveryRevision: row.delivery_revision,
+    deliveryHash: row.delivery_hash,
+    receiptId: row.receipt_id,
+    receiptHash: row.receipt_hash,
+    lineageHash: row.lineage_hash
+  };
+  if (canonicalJson(actualColumns) !== canonicalJson(expectedColumns)) {
+    throw new RepositoryError("INTEGRITY_FAILURE", "Governed snapshot lineage columns were substituted");
+  }
+}
+
+function assertExactGovernedSnapshotLineage(
+  database: DatabaseSync,
+  snapshot: DatasetSnapshotV2,
+  expected: GovernedSnapshotCommitLineageV1
+): void {
+  verifyStoredSnapshotLineage(database, snapshot);
+  const row = readSnapshotLineage(database, snapshot.tenantId, snapshot.snapshotId);
+  if (row?.lineage_kind !== "governed_capture" || row.lineage_json !== canonicalJson(expected)) {
+    throw new RepositoryError(
+      "IDEMPOTENCY_CONFLICT",
+      "Snapshot idempotency replay supplied different governed capture lineage"
+    );
+  }
 }
 
 function validateCorrectionLineage(database: DatabaseSync, record: DatasetSnapshotV2): void {

@@ -3,12 +3,26 @@ import express, { type Express, type Request, type Response } from "express";
 import { z } from "zod";
 import {
   ApprovalDecisionSchema,
+  BrowserSafePayloadSchema,
   HighRiskActionRequestSchema,
   NAVIGATION,
+  PilotEmptyMutationSchema,
+  PilotJobHandleSchema,
+  PilotJobResultViewSchema,
+  PilotJobScopeSchema,
+  PilotJobStatusViewSchema,
+  PilotPortfolioSurveillanceStartRequestSchema,
+  PilotStartedJobSchema,
   SectionIdSchema,
   SourceContractDraftSchema,
+  SourceContractPreviewSchema,
+  WorkbenchSectionPayloadSchema,
   hasPermission,
   type BackendMetadata,
+  type PilotCapabilityResponse,
+  type PilotJobResultResponse,
+  type PilotJobStatusResponse,
+  type PilotStartJobResponse,
   type PlatformPermission,
   type SessionPrincipal,
 } from "@abl/platform-contracts";
@@ -32,6 +46,12 @@ import {
   type RiskPlatformAdapter,
 } from "./platform-adapter.js";
 import {
+  PilotJobServiceError,
+  toPilotStartInput,
+  type PilotJobActorContext,
+  type PilotJobApi,
+} from "./pilot-job-service.js";
+import {
   InMemorySessionStore,
   OIDC_TRANSACTION_COOKIE,
   SESSION_COOKIE,
@@ -53,12 +73,15 @@ const DEMO_PRINCIPALS: readonly SessionPrincipal[] = [
 ];
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const MAX_BROWSER_PAYLOAD_BYTES = 2 * 1_024 * 1_024;
 
 export interface BuildAppOptions {
   readonly configuration: BffConfiguration;
   readonly sessions?: SessionStore;
   readonly approvals?: ApprovalService;
   readonly adapter?: RiskPlatformAdapter;
+  /** Explicit capability injection; omitted by the default BFF entry point. */
+  readonly pilotJobs?: PilotJobApi;
   readonly oidc?: OidcIdentityProvider;
   readonly now?: () => Date;
 }
@@ -79,14 +102,40 @@ function errorResponse(response: Response, status: number, code: string, message
   response.status(status).json({ error: { code, message } });
 }
 
+function validatedBrowserOutput<T>(schema: z.ZodType<T>, value: unknown): T {
+  const parsed = schema.parse(value);
+  BrowserSafePayloadSchema.parse(parsed);
+  if (Buffer.byteLength(JSON.stringify(parsed), "utf8") > MAX_BROWSER_PAYLOAD_BYTES) {
+    throw new Error("Injected browser payload exceeds the response limit");
+  }
+  return parsed;
+}
+
 export function buildApp(options: BuildAppOptions): Express {
   const { configuration } = options;
+  if (configuration.production) {
+    if (configuration.authMode !== "oidc") {
+      throw new Error("Production BFF requires OIDC authentication");
+    }
+    if (!options.adapter || options.adapter.dataMode !== "environment") {
+      throw new Error("Production BFF requires an explicit environment-backed data adapter");
+    }
+    if (!options.sessions || options.sessions instanceof InMemorySessionStore) {
+      throw new Error("Production BFF requires an explicit durable session store");
+    }
+  }
   const now = options.now ?? (() => new Date());
   const sessions =
     options.sessions ??
     new InMemorySessionStore(configuration.sessionTtlMs, configuration.stepUpTtlMs, now);
   const approvals = options.approvals ?? new ApprovalService(now);
   const adapter = options.adapter ?? new FixtureRiskPlatformAdapter();
+  const pilotJobs = options.pilotJobs
+    ? {
+        scope: PilotJobScopeSchema.parse(options.pilotJobs.scope),
+        service: options.pilotJobs.service,
+      }
+    : undefined;
   const transactions = new OidcTransactionStore(
     now,
     configuration.oidcTransactionTtlMs,
@@ -177,6 +226,30 @@ export function buildApp(options: BuildAppOptions): Express {
     }
     return true;
   };
+  const requirePilotJobs = (response: Response): PilotJobApi | undefined => {
+    if (!pilotJobs) {
+      errorResponse(
+        response,
+        404,
+        "pilot_api_unavailable",
+        "The governed pilot job API is not configured",
+      );
+    }
+    return pilotJobs;
+  };
+  const pilotActorContext = (
+    pilot: PilotJobApi,
+    session: SessionRecord,
+  ): PilotJobActorContext => ({
+    ...pilot.scope,
+    principalId: session.principal.id,
+    roles: session.principal.roles,
+  });
+  const handlePilotJobError = (error: unknown, response: Response): boolean => {
+    if (!(error instanceof PilotJobServiceError)) return false;
+    errorResponse(response, error.status, error.code, error.message);
+    return true;
+  };
 
   const beginOidc = async (
     request: Request,
@@ -237,8 +310,10 @@ export function buildApp(options: BuildAppOptions): Express {
     const metadata: BackendMetadata = {
       product: "ABL Portfolio Risk Console",
       backendMode: configuration.authMode,
-      dataMode: "fixture",
-      warning: "Demonstration data only. No live control-plane or portfolio system is connected.",
+      dataMode: adapter.dataMode,
+      warning: adapter.dataMode === "fixture"
+        ? "Demonstration data only. No live control-plane or portfolio system is connected."
+        : "Environment-backed data adapter configured; governed capabilities remain policy-gated.",
     };
     response.json(metadata);
   });
@@ -353,6 +428,139 @@ export function buildApp(options: BuildAppOptions): Express {
     });
   });
 
+  app.get("/api/v1/pilot", (request, response) => {
+    const session = requireSession(request, response);
+    if (!session || !requirePermission(session, "job:operate", response)) return;
+    const pilot = requirePilotJobs(response);
+    if (!pilot) return;
+    const payload = {
+      enabled: true,
+      scope: pilot.scope,
+      operations: ["portfolio_surveillance_v1"],
+    } as const satisfies PilotCapabilityResponse;
+    response.json(payload);
+  });
+
+  app.post("/api/v1/pilot/jobs", (request, response, next) => {
+    void (async () => {
+      const session = requireSession(request, response);
+      if (
+        !session ||
+        !requireWriteProtection(request, response, session) ||
+        !requirePermission(session, "job:operate", response)
+      ) return;
+      const pilot = requirePilotJobs(response);
+      if (!pilot) return;
+      const parsed = PilotPortfolioSurveillanceStartRequestSchema.safeParse(request.body);
+      if (!parsed.success) {
+        errorResponse(response, 400, "invalid_pilot_job", "Pilot job request is invalid");
+        return;
+      }
+      try {
+        const authorized = await pilot.service.startPortfolioSurveillance(
+          pilotActorContext(pilot, session),
+          toPilotStartInput(parsed.data),
+        );
+        const payload = {
+          scope: pilot.scope,
+          job: validatedBrowserOutput(PilotStartedJobSchema, authorized.value),
+        } satisfies PilotStartJobResponse;
+        response.status(202).json(payload);
+      } catch (error) {
+        if (!handlePilotJobError(error, response)) throw error;
+      }
+    })().catch(next);
+  });
+
+  app.get("/api/v1/pilot/jobs/:jobHandle/status", (request, response, next) => {
+    void (async () => {
+      const session = requireSession(request, response);
+      if (!session || !requirePermission(session, "job:operate", response)) return;
+      const pilot = requirePilotJobs(response);
+      if (!pilot) return;
+      const handle = PilotJobHandleSchema.safeParse(request.params.jobHandle);
+      if (!handle.success) {
+        errorResponse(response, 400, "invalid_job_handle", "Job handle is invalid");
+        return;
+      }
+      try {
+        const authorized = await pilot.service.getJobStatus(
+          pilotActorContext(pilot, session),
+          handle.data,
+        );
+        const payload = {
+          scope: pilot.scope,
+          job: validatedBrowserOutput(PilotJobStatusViewSchema, authorized.value),
+        } satisfies PilotJobStatusResponse;
+        response.json(payload);
+      } catch (error) {
+        if (!handlePilotJobError(error, response)) throw error;
+      }
+    })().catch(next);
+  });
+
+  app.get("/api/v1/pilot/jobs/:jobHandle/result", (request, response, next) => {
+    void (async () => {
+      const session = requireSession(request, response);
+      if (!session || !requirePermission(session, "job:operate", response)) return;
+      const pilot = requirePilotJobs(response);
+      if (!pilot) return;
+      const handle = PilotJobHandleSchema.safeParse(request.params.jobHandle);
+      if (!handle.success) {
+        errorResponse(response, 400, "invalid_job_handle", "Job handle is invalid");
+        return;
+      }
+      try {
+        const authorized = await pilot.service.getJobResult(
+          pilotActorContext(pilot, session),
+          handle.data,
+        );
+        const payload = {
+          scope: pilot.scope,
+          result: validatedBrowserOutput(PilotJobResultViewSchema, authorized.value),
+        } satisfies PilotJobResultResponse;
+        response.json(payload);
+      } catch (error) {
+        if (!handlePilotJobError(error, response)) throw error;
+      }
+    })().catch(next);
+  });
+
+  app.post("/api/v1/pilot/jobs/:jobHandle/cancel", (request, response, next) => {
+    void (async () => {
+      const session = requireSession(request, response);
+      if (
+        !session ||
+        !requireWriteProtection(request, response, session) ||
+        !requirePermission(session, "job:operate", response)
+      ) return;
+      const pilot = requirePilotJobs(response);
+      if (!pilot) return;
+      const handle = PilotJobHandleSchema.safeParse(request.params.jobHandle);
+      if (!handle.success) {
+        errorResponse(response, 400, "invalid_job_handle", "Job handle is invalid");
+        return;
+      }
+      if (!PilotEmptyMutationSchema.safeParse(request.body).success) {
+        errorResponse(response, 400, "invalid_cancel_request", "Cancel request must be empty");
+        return;
+      }
+      try {
+        const authorized = await pilot.service.cancelJob(
+          pilotActorContext(pilot, session),
+          handle.data,
+        );
+        const payload = {
+          scope: pilot.scope,
+          job: validatedBrowserOutput(PilotJobStatusViewSchema, authorized.value),
+        } satisfies PilotJobStatusResponse;
+        response.json(payload);
+      } catch (error) {
+        if (!handlePilotJobError(error, response)) throw error;
+      }
+    })().catch(next);
+  });
+
   app.get("/api/v1/workbench/:section", (request, response, next) => {
     void (async () => {
       const session = requireSession(request, response);
@@ -364,7 +572,14 @@ export function buildApp(options: BuildAppOptions): Express {
       }
       const navigation = NAVIGATION.find((item) => item.id === section.data);
       if (!navigation || !requirePermission(session, navigation.permission, response)) return;
-      response.json(await adapter.getWorkbenchSection(section.data));
+      const payload = validatedBrowserOutput(
+        WorkbenchSectionPayloadSchema,
+        await adapter.getWorkbenchSection(section.data),
+      );
+      if (payload.section !== section.data) {
+        throw new Error("Risk platform adapter returned the wrong workbench section");
+      }
+      response.json(payload);
     })().catch(next);
   });
 
@@ -381,7 +596,10 @@ export function buildApp(options: BuildAppOptions): Express {
         errorResponse(response, 400, "invalid_source_contract", "Source contract is invalid or contains credential material");
         return;
       }
-      response.json(await adapter.previewSourceContract(parsed.data));
+      response.json(validatedBrowserOutput(
+        SourceContractPreviewSchema,
+        await adapter.previewSourceContract(parsed.data),
+      ));
     })().catch(next);
   });
 

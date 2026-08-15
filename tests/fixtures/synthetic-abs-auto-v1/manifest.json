@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "synthetic_fixture_manifest_v1",
+  "generator": {
+    "name": "aegis-ledger-synthetic-abs-auto",
+    "version": "1.0.0",
+    "seed": "SYN-SEED-001"
+  },
+  "files": [
+    {
+      "path": "fixture.json",
+      "sha256": "73360ca31d1187bb10660e9d5ed724c5f19db2b2b8626cb1b12cf143eeb429b1"
+    }
+  ]
+}

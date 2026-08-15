@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   HighRiskActionRequestSchema,
   OpaqueSecretRefSchema,
+  PilotJobHandleSchema,
+  PilotPortfolioSurveillanceStartRequestSchema,
   SourceContractDraftSchema,
   permissionsForRoles,
 } from "../src/index.js";
@@ -71,5 +73,28 @@ describe("platform contracts", () => {
       secretRef: "secretref://vault/postgres/risk-reader#v2",
       notes: "password=hunter2",
     }).success).toBe(false);
+  });
+
+  it("accepts only bounded, unique, server-scope-free pilot job requests", () => {
+    const valid = {
+      certificationManifestIds: ["cert-2026-06", "cert-2026-07"],
+      definitionVersionIds: ["metric-pack-v1", "methodology-v1"],
+      idempotencyKey: "surveillance-2026-07",
+      purpose: "monthly_surveillance",
+    };
+    expect(PilotPortfolioSurveillanceStartRequestSchema.safeParse(valid).success).toBe(true);
+    expect(PilotPortfolioSurveillanceStartRequestSchema.safeParse({
+      ...valid,
+      tenantId: "attacker-tenant",
+    }).success).toBe(false);
+    expect(PilotPortfolioSurveillanceStartRequestSchema.safeParse({
+      ...valid,
+      certificationManifestIds: ["cert-2026-07", "cert-2026-07"],
+    }).success).toBe(false);
+  });
+
+  it("accepts bounded URL-safe opaque pilot job handles", () => {
+    expect(PilotJobHandleSchema.safeParse("opaque.job_handle-0123456789").success).toBe(true);
+    expect(PilotJobHandleSchema.safeParse("../../another-tenant/job").success).toBe(false);
   });
 });

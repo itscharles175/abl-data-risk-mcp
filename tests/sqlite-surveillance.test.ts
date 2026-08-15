@@ -29,6 +29,7 @@ import {
   SqliteSurveillanceEvidenceRepositories
 } from "../src/repositories/sqlite-surveillance.js";
 import { RepositoryError } from "../src/repositories/ports.js";
+import { createGovernedSnapshotCommitLineageV1 } from "../src/repositories/governed-snapshot-commit.js";
 
 const directories: string[] = [];
 const HASH = (label: string): Sha256Hash => canonicalHash(label);
@@ -130,6 +131,56 @@ test("dataset snapshot repository is tenant scoped, actor idempotent, paged, imm
   reopened.close();
 });
 
+test("direct correction lookup sees a concurrent low-key successor beyond a 1000-row page", async () => {
+  const path = databasePath();
+  const reader = new SqliteDatasetSnapshotV2Repository(path);
+  const writer = new SqliteDatasetSnapshotV2Repository(path);
+  for (let index = 0; index < 1_000; index += 1) {
+    const date = new Date(Date.UTC(2023, 0, index + 1)).toISOString().slice(0, 10);
+    const id = `m-filler-${String(index).padStart(4, "0")}`;
+    await writer.put(snapshot(id, date), context(id));
+  }
+  const original = snapshot("z-terminal-target", "2026-07-31");
+  await writer.put(original, context(original.snapshotId));
+
+  const firstPage = await reader.list("tenant-a", { limit: 1_000 });
+  assert.equal(firstPage.items.length, 1_000);
+  assert.ok(firstPage.nextCursor);
+
+  const correction = snapshot(
+    "a-concurrent-correction",
+    original.asOfDate,
+    {
+      kind: "correction",
+      correctsSnapshotId: original.snapshotId,
+      correctsSnapshotHash: original.snapshotHash,
+      correctionSequence: 1,
+      reasonCode: "concurrent_source_correction",
+      reason: "Correction inserted after the first terminality page",
+      detectedAt: "2026-08-02T00:00:00.000Z"
+    },
+    "2026-08-02T01:00:00.000Z"
+  );
+  await writer.put(correction, context(correction.snapshotId));
+
+  const continuation = await reader.list("tenant-a", {
+    cursor: firstPage.nextCursor ?? undefined
+  });
+  assert.equal(continuation.items.some((candidate) => candidate.snapshotId === correction.snapshotId), false);
+  assert.equal(
+    (await reader.getDirectCorrection("tenant-a", original.snapshotId, original.snapshotHash))
+      ?.snapshotId,
+    correction.snapshotId
+  );
+  assert.equal(
+    await reader.getDirectCorrection("tenant-b", original.snapshotId, original.snapshotHash),
+    undefined
+  );
+
+  writer.close();
+  reader.close();
+});
+
 test("correction lineage requires an exact contiguous, non-forking predecessor", async () => {
   const path = databasePath();
   const repository = new SqliteDatasetSnapshotV2Repository(path);
@@ -196,6 +247,165 @@ test("correction lineage requires an exact contiguous, non-forking predecessor",
     (error: unknown) => repositoryCode(error, "NOT_FOUND")
   );
   repository.close();
+});
+
+test("governed capture CAS scopes originals by facility population and permits one concurrent child", async () => {
+  const path = databasePath();
+  const firstConnection = new SqliteDatasetSnapshotV2Repository(path);
+  const secondConnection = new SqliteDatasetSnapshotV2Repository(path);
+  const original = snapshot("governed-original", "2026-07-31");
+  await firstConnection.commitGovernedCapture(
+    original,
+    governedLineage(original, "dataset-a", "facility-a", "binding-a", "delivery-original"),
+    context("governed-original")
+  );
+
+  const otherFacility = snapshot("governed-other-facility", original.asOfDate);
+  await secondConnection.commitGovernedCapture(
+    otherFacility,
+    governedLineage(
+      otherFacility,
+      "dataset-b",
+      "facility-b",
+      "binding-b",
+      "delivery-other-facility"
+    ),
+    context("governed-other-facility")
+  );
+
+  const duplicatePopulation = snapshot("governed-duplicate", original.asOfDate);
+  await assert.rejects(
+    secondConnection.commitGovernedCapture(
+      duplicatePopulation,
+      governedLineage(
+        duplicatePopulation,
+        "dataset-a",
+        "facility-a",
+        "binding-a",
+        "delivery-duplicate"
+      ),
+      context("governed-duplicate")
+    ),
+    (error: unknown) => repositoryCode(error, "ALREADY_EXISTS")
+  );
+
+  const correctionInput = {
+    kind: "correction" as const,
+    correctsSnapshotId: original.snapshotId,
+    correctsSnapshotHash: original.snapshotHash,
+    correctionSequence: 1,
+    reasonCode: "restatement",
+    reason: "Source restatement",
+    detectedAt: "2026-08-02T00:00:00.000Z"
+  };
+  const correctionA = snapshot(
+    "governed-correction-a",
+    original.asOfDate,
+    correctionInput,
+    "2026-08-02T01:00:00.000Z"
+  );
+  const correctionB = snapshot(
+    "governed-correction-b",
+    original.asOfDate,
+    correctionInput,
+    "2026-08-02T01:01:00.000Z"
+  );
+  const results = await Promise.allSettled([
+    firstConnection.commitGovernedCapture(
+      correctionA,
+      governedLineage(correctionA, "dataset-a", "facility-a", "binding-a", "delivery-correction-a"),
+      context("governed-correction-a")
+    ),
+    secondConnection.commitGovernedCapture(
+      correctionB,
+      governedLineage(correctionB, "dataset-a", "facility-a", "binding-a", "delivery-correction-b"),
+      context("governed-correction-b")
+    )
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  const rejected = results.find((result) => result.status === "rejected");
+  assert.ok(rejected?.status === "rejected");
+  assert.equal((rejected.reason as RepositoryError).code, "CONCURRENCY_CONFLICT");
+
+  firstConnection.close();
+  secondConnection.close();
+});
+
+test("governed capture lineage reads are tenant-fenced, verified, and reopen-safe", async () => {
+  const path = databasePath();
+  const repository = new SqliteDatasetSnapshotV2Repository(path);
+  const governed = snapshot("governed-lineage-read", "2026-07-31");
+  const lineage = governedLineage(
+    governed,
+    "dataset-lineage-read",
+    "facility-lineage-read",
+    "binding-lineage-read",
+    "delivery-lineage-read"
+  );
+  await repository.commitGovernedCapture(governed, lineage, context("governed-lineage-read"));
+  await repository.put(snapshot("legacy-lineage-read", "2026-08-31"), context("legacy-lineage-read"));
+
+  assert.deepEqual(
+    await repository.getGovernedCaptureLineage("tenant-a", governed.snapshotId),
+    lineage
+  );
+  assert.equal(await repository.getGovernedCaptureLineage("tenant-b", governed.snapshotId), undefined);
+  assert.equal(await repository.getGovernedCaptureLineage("tenant-a", "missing-lineage"), undefined);
+  assert.equal(
+    await repository.getGovernedCaptureLineage("tenant-a", "legacy-lineage-read"),
+    undefined
+  );
+  repository.close();
+
+  const reopened = new SqliteDatasetSnapshotV2Repository(path);
+  assert.deepEqual(
+    await reopened.getGovernedCaptureLineage("tenant-a", governed.snapshotId),
+    lineage
+  );
+  reopened.close();
+});
+
+test("governed capture lineage reads reject tampered lineage indexes", async () => {
+  const path = databasePath();
+  const repository = new SqliteDatasetSnapshotV2Repository(path);
+  const governed = snapshot("governed-lineage-tamper", "2026-07-31");
+  await repository.commitGovernedCapture(
+    governed,
+    governedLineage(
+      governed,
+      "dataset-lineage-tamper",
+      "facility-lineage-tamper",
+      "binding-lineage-tamper",
+      "delivery-lineage-tamper"
+    ),
+    context("governed-lineage-tamper")
+  );
+  repository.close();
+
+  const database = new DatabaseSync(path);
+  database.exec("DROP TRIGGER surveillance_dataset_snapshot_lineage_v1_no_update");
+  database
+    .prepare(
+      `UPDATE surveillance_dataset_snapshot_lineage_v1
+          SET delivery_id = ?
+        WHERE tenant_id = ? AND record_id = ?`
+    )
+    .run("delivery-substituted", "tenant-a", governed.snapshotId);
+  database.exec(`
+    CREATE TRIGGER surveillance_dataset_snapshot_lineage_v1_no_update
+    BEFORE UPDATE ON surveillance_dataset_snapshot_lineage_v1
+    BEGIN
+      SELECT RAISE(ABORT, 'surveillance dataset snapshot lineage is immutable');
+    END;
+  `);
+  database.close();
+
+  const reopened = new SqliteDatasetSnapshotV2Repository(path);
+  await assert.rejects(
+    reopened.getGovernedCaptureLineage("tenant-a", governed.snapshotId),
+    (error: unknown) => repositoryCode(error, "INTEGRITY_FAILURE")
+  );
+  reopened.close();
 });
 
 test("certified evidence requires the persisted tenant snapshot and exact ArtifactStore metadata", async () => {
@@ -355,6 +565,41 @@ function snapshot(
     }],
     correction,
     createdBy: "snapshot-worker"
+  });
+}
+
+function governedLineage(
+  snapshotValue: DatasetSnapshotV2,
+  datasetId: string,
+  facilityId: string,
+  bindingId: string,
+  deliveryId: string
+) {
+  return createGovernedSnapshotCommitLineageV1({
+    contractVersion: 1,
+    tenantId: snapshotValue.tenantId,
+    snapshotId: snapshotValue.snapshotId,
+    snapshotHash: snapshotValue.snapshotHash,
+    datasetId,
+    facilityId,
+    sourceContract: snapshotValue.sourceContract,
+    scopeBinding: {
+      bindingId,
+      revision: 1,
+      bindingHash: HASH(`binding:${bindingId}`)
+    },
+    sourceDelivery: {
+      deliveryId,
+      deliveryRevision: 1,
+      deliveryHash: HASH(`delivery:${deliveryId}`),
+      locatorHash: HASH(`locator:${deliveryId}`),
+      sourceVersionHash: HASH(`source-version:${deliveryId}`)
+    },
+    extractionReceipt: {
+      receiptId: `${snapshotValue.snapshotId}:extraction`,
+      receiptHash: snapshotValue.hashes.extractionHash
+    },
+    asOfDate: snapshotValue.asOfDate
   });
 }
 

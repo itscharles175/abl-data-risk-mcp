@@ -11,9 +11,9 @@ import { evaluateMonitoring } from "../src/domain/monitoring.js";
 import {
   DEFAULT_REMOTE_GOVERNED_JOB_OPERATIONS,
   buildRemoteServer,
-  type GovernedWorkflowApi,
-  type RemotePortfolioSurveillanceStartInput
+  type GovernedWorkflowApi
 } from "../src/remote-server.js";
+import type { StartPortfolioSurveillanceJobV4Input } from "../src/services/portfolio-surveillance-workflow-v4.js";
 import { createVerifiedPrincipalContext } from "../src/security/identity.js";
 import { compileAuthorizationPolicy } from "../src/security/policy.js";
 import { createHmacKeyRing, issuePrincipalBoundHandle } from "../src/security/signed-plan.js";
@@ -720,11 +720,22 @@ for (const [label, mode] of remoteProtocolModes) {
     const control = new ControlStore(":memory:");
     const definitions = new DefinitionStore(":memory:");
     const monitoringAlerts = new MonitoringAlertStore(":memory:");
-    const starts: RemotePortfolioSurveillanceStartInput[] = [];
+    const starts: StartPortfolioSurveillanceJobV4Input[] = [];
+    const routedLegacyStarts: string[] = [];
+    const routedLifecycleCalls: string[] = [];
     const enabledWorkflow = {
+      ...workflow,
+      startAuthorized: async (
+        verifiedPrincipal: typeof principal,
+        input: Parameters<GovernedWorkflowApi["startAuthorized"]>[1],
+        requestContext?: Parameters<GovernedWorkflowApi["startAuthorized"]>[2]
+      ) => {
+        routedLegacyStarts.push(input.operation);
+        return await workflow.startAuthorized(verifiedPrincipal, input, requestContext);
+      },
       startPortfolioSurveillanceAuthorized: async (
         _verifiedPrincipal: typeof principal,
-        input: RemotePortfolioSurveillanceStartInput
+        input: StartPortfolioSurveillanceJobV4Input
       ) => {
         starts.push(structuredClone(input));
         return {
@@ -733,6 +744,27 @@ for (const [label, mode] of remoteProtocolModes) {
             status: "queued",
             operation: input.operation
           },
+          obligations: [policy.defaultObligations]
+        };
+      },
+      getJobStatusAuthorized: async () => {
+        routedLifecycleCalls.push("status");
+        return {
+          value: { status: "queued", operation: "portfolio_surveillance_v1" },
+          obligations: [policy.defaultObligations]
+        };
+      },
+      getJobResultAuthorized: async () => {
+        routedLifecycleCalls.push("result");
+        return {
+          value: { operation: "portfolio_surveillance_v1", totals: { balance: "10" } },
+          obligations: [policy.defaultObligations]
+        };
+      },
+      cancelJobAuthorized: async () => {
+        routedLifecycleCalls.push("cancel");
+        return {
+          value: { status: "cancelled", cancellationRequested: true },
           obligations: [policy.defaultObligations]
         };
       }
@@ -752,7 +784,7 @@ for (const [label, mode] of remoteProtocolModes) {
           monitoringAlerts,
           policy,
           workflow,
-          portfolioSurveillanceWorkflow: enabledWorkflow
+          compositeJobWorkflow: enabledWorkflow
         },
         context
       )
@@ -803,6 +835,37 @@ for (const [label, mode] of remoteProtocolModes) {
           purpose: "portfolio_review"
         }
       ]);
+
+      const legacyStarted = await client.callTool({
+        name: "abl_start_job",
+        arguments: {
+          operation: "snapshot_stratification",
+          certification_manifest_id: "certification-jan",
+          definition_ids: ["stratification-v1"],
+          idempotency_key: "legacy-job-through-composite",
+          purpose: "portfolio_review"
+        }
+      });
+      assert.equal(legacyStarted.isError, undefined, JSON.stringify(legacyStarted));
+      assert.deepEqual(routedLegacyStarts, ["snapshot_stratification"]);
+
+      const jobHandle = (started.structuredContent as { job: { jobHandle: string } }).job.jobHandle;
+      const status = await client.callTool({
+        name: "abl_get_job_status",
+        arguments: { job_handle: jobHandle }
+      });
+      const result = await client.callTool({
+        name: "abl_get_job_result",
+        arguments: { job_handle: jobHandle }
+      });
+      const cancelled = await client.callTool({
+        name: "abl_cancel_job",
+        arguments: { job_handle: jobHandle }
+      });
+      assert.equal(status.isError, undefined, JSON.stringify(status));
+      assert.equal(result.isError, undefined, JSON.stringify(result));
+      assert.equal(cancelled.isError, undefined, JSON.stringify(cancelled));
+      assert.deepEqual(routedLifecycleCalls, ["status", "result", "cancel"]);
 
       const smuggled = await client.callTool({
         name: "abl_start_job",

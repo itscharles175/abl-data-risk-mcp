@@ -6,11 +6,11 @@
   "description": "A model-agnostic MCP server for governed ABL and loan-tape analytics.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/stag175/abl-data-risk-mcp.git"
+    "url": "https://github.com/itscharles175/abl-data-risk-mcp.git"
   },
-  "homepage": "https://github.com/stag175/abl-data-risk-mcp#readme",
+  "homepage": "https://github.com/itscharles175/abl-data-risk-mcp#readme",
   "bugs": {
-    "url": "https://github.com/stag175/abl-data-risk-mcp/issues"
+    "url": "https://github.com/itscharles175/abl-data-risk-mcp/issues"
   },
   "keywords": [
     "mcp",
@@ -20,6 +20,20 @@
     "loan-analytics"
   ],
   "type": "module",
+  "exports": {
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "default": "./dist/contracts/index.js"
+    },
+    "./repositories": {
+      "types": "./dist/repositories/index.d.ts",
+      "default": "./dist/repositories/index.js"
+    },
+    "./services": {
+      "types": "./dist/services/index.d.ts",
+      "default": "./dist/services/index.js"
+    }
+  },
   "bin": {
     "abl-mcp": "dist/cli.js",
     "abl-operator": "dist/operator/main.js",

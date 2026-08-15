@@ -5,7 +5,7 @@ Record every checked item in a release-evidence bundle tied to the immutable com
 ## 1. Scope and code intelligence
 
 - [ ] Release version, commit, change owner, reviewer, target tenants/regions, and rollback owner are recorded.
-- [ ] GitNexus index is current (`node .gitnexus/run.cjs status`); stale indexes are rebuilt with PDG enabled for security review.
+- [ ] GitNexus index is current (`node scripts/verify-gitnexus-current.mjs`); a clean clone has GitNexus installed on `PATH`, and stale indexes are rebuilt with PDG enabled for security review.
 - [ ] GitNexus `detect_changes` matches the intended symbols and execution flows; every HIGH/CRITICAL blast radius has explicit review evidence.
 - [ ] GitNexus circular-import check, relevant traces, API/tool maps, shape checks, and taint/PDG findings were reviewed.
 - [ ] No unrelated working-tree changes, generated secrets, local databases, raw tapes, or customer data are included.

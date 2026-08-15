@@ -10,7 +10,8 @@ import {
   type SourceContractPreview,
   type WorkbenchSectionPayload,
 } from "@abl/platform-contracts";
-import { ApiError, platformApi } from "./api.js";
+import { platformApi } from "./api.js";
+import { PilotWorkflowPanel } from "./PilotWorkflowPanel.js";
 
 const DEMO_USERS = [
   { id: "demo-analyst", name: "Riley Analyst", role: "Risk analyst", note: "Portfolio and alert review" },
@@ -118,14 +119,14 @@ function SectionView({ payload }: { readonly payload: WorkbenchSectionPayload })
           <div><h2>Current review set</h2><p>{payload.rows.length} representative records</p></div>
           <button type="button" className="quiet-button">Filter</button>
         </div>
-        <div className="table-scroll">
+        <div className="table-scroll" tabIndex={0} aria-label={`${payload.title} records`}>
           <table>
             <caption className="sr-only">{payload.title} fixture records</caption>
             <thead><tr><th scope="col">State</th>{payload.columns.map((column) => <th scope="col" key={column.key}>{column.label}</th>)}</tr></thead>
             <tbody>
               {payload.rows.map((row) => (
                 <tr key={row.id}>
-                  <td><span className={`status-dot status-${row.status}`} /><span className="sr-only">{row.status}</span></td>
+                  <td aria-label={`State: ${row.status}`}><span className={`status-dot status-${row.status}`} aria-hidden="true" /></td>
                   {payload.columns.map((column) => <td key={column.key}>{row.values[column.key] ?? "—"}</td>)}
                 </tr>
               ))}
@@ -324,7 +325,7 @@ function Workspace({ backendMode, session, onSessionChange, onSignedOut }: { rea
         <div className="brand-lockup"><span className="brand-mark">A</span><span>ABL / RISK</span></div>
         <nav aria-label="Primary navigation">{groups.map((group) => {
           const items = navigation.filter((item) => item.group === group);
-          return items.length ? <section className="nav-group" key={group}><h2>{group}</h2>{items.map((item) => <button className={item.id === section ? "nav-item active" : "nav-item"} type="button" key={item.id} aria-current={item.id === section ? "page" : undefined} onClick={() => setSection(item.id)}><span className="nav-glyph" aria-hidden="true">{item.label.slice(0, 1)}</span>{item.label}</button>)}</section> : null;
+          return items.length ? <section className="nav-group" key={group}><h2>{group}</h2>{items.map((item) => <button className={item.id === section ? "nav-item active" : "nav-item"} type="button" key={item.id} aria-label={item.label} aria-current={item.id === section ? "page" : undefined} onClick={() => setSection(item.id)}><span className="nav-glyph" aria-hidden="true">{item.label.slice(0, 1)}</span><span className="nav-label">{item.label}</span></button>)}</section> : null;
         })}</nav>
         <div className="sidebar-foot"><span className="environment-dot" />Local fixture environment</div>
       </aside>
@@ -339,6 +340,7 @@ function Workspace({ backendMode, session, onSessionChange, onSignedOut }: { rea
           {error ? <p className="error-banner" role="alert">{error}</p> : null}
           {payload ? <SectionView payload={payload} /> : !error ? <p aria-busy="true">Loading review data…</p> : null}
           {section === "source-contracts" ? <SourceOnboardingPanel session={session} /> : null}
+          {section === "jobs" ? <PilotWorkflowPanel csrfToken={session.csrfToken} /> : null}
           {ACTION_FOR_SECTION[section] ? <GovernedActionPanel backendMode={backendMode} kind={ACTION_FOR_SECTION[section]} session={session} onSessionChange={onSessionChange} /> : null}
           {section === "approvals" ? <ApprovalsPanel backendMode={backendMode} session={session} onSessionChange={onSessionChange} /> : null}
         </div>
@@ -352,16 +354,27 @@ export function App(): ReactElement {
   const [session, setSession] = useState<SessionView | null>();
 
   useEffect(() => {
-    void platformApi.metadata().then(setMetadata);
-    void platformApi.session().then(setSession).catch((cause: unknown) => {
-      if (cause instanceof ApiError && cause.status === 401) setSession(null);
-      else setSession(null);
+    void platformApi.metadata().then(async (nextMetadata) => {
+      setMetadata(nextMetadata);
+      if (nextMetadata.backendMode === "fixture") {
+        setSession(null);
+        return;
+      }
+      try {
+        setSession(await platformApi.session());
+      } catch (cause) {
+        setSession(null);
+      }
+    }).catch(() => {
+      setSession(null);
     });
   }, []);
 
   if (session === undefined || metadata === undefined) return <LoadingScreen />;
   if (session === null) return <SignIn metadata={metadata} onSignedIn={setSession} />;
-  return <Workspace backendMode={metadata.backendMode} session={session} onSessionChange={setSession} onSignedOut={() => setSession(null)} />;
+  return <Workspace backendMode={metadata.backendMode} session={session} onSessionChange={setSession} onSignedOut={() => {
+    setSession(null);
+  }} />;
 }
 
 export { ACTION_FOR_SECTION, DEMO_USERS, HIGH_RISK_ACTION_KINDS };

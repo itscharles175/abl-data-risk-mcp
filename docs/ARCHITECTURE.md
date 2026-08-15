@@ -238,7 +238,7 @@ See [OPERATIONS.md](./OPERATIONS.md) and [RELEASE_CHECKLIST.md](./RELEASE_CHECKL
 - Deterministic calculations run in resource-limited worker threads with hard timeouts and cooperative cancellation/lease supervision. Worker termination is process-local isolation, not an operating-system sandbox.
 - Durable stores do not share a distributed transaction, and the current SQLite/filesystem base is single-replica.
 - Append-only local audit exists; independently administered WORM export is not wired.
-- The current working-tree OCI image and deployment assets passed local Docker, SBOM, vulnerability, secret, IaC, Compose, Kustomize, and strict Kubernetes-schema checks; registry promotion, signing/provenance, target-architecture rebuilds, and live cloud deployment remain external gates.
+- OCI and deployment checks are operator-run and must be bound to the exact release commit; current-commit Docker, SBOM, vulnerability, secret, IaC, Compose, Kustomize, strict Kubernetes-schema, registry, signing/provenance, target-architecture, and live cloud evidence remain release gates.
 - Automated SDK tests are supplemented by real Codex CLI tool discovery/call and real Claude Code connection-health evidence. Claude Desktop and authenticated remote-client acceptance remain external gates, and every supported client release still needs its own acceptance evidence.
 - Only CSV, JSON, NDJSON, SQLite, and PostgreSQL extraction paths exist. Other file/warehouse adapters remain roadmap work.
 

@@ -274,10 +274,164 @@ export const SourceContractDraftSchema = z
   });
 export type SourceContractDraft = z.infer<typeof SourceContractDraftSchema>;
 
+const PilotPortableIdentifierSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+
+const PilotRequestIdentifierSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u);
+
+export const PilotJobScopeSchema = z
+  .object({
+    tenantId: PilotPortableIdentifierSchema,
+    facilityId: PilotPortableIdentifierSchema,
+  })
+  .strict();
+export type PilotJobScope = z.infer<typeof PilotJobScopeSchema>;
+
+export const PilotJobHandleSchema = z
+  .string()
+  .min(20)
+  .max(1_024)
+  .regex(/^[A-Za-z0-9._~-]+$/u);
+
+export const PilotPortfolioSurveillanceStartRequestSchema = z
+  .object({
+    certificationManifestIds: z.array(PilotPortableIdentifierSchema).min(2).max(120),
+    definitionVersionIds: z.array(PilotPortableIdentifierSchema).min(2).max(256),
+    idempotencyKey: PilotRequestIdentifierSchema,
+    purpose: PilotRequestIdentifierSchema,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (new Set(request.certificationManifestIds).size !== request.certificationManifestIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["certificationManifestIds"],
+        message: "Certification manifest ids must be unique",
+      });
+    }
+    if (new Set(request.definitionVersionIds).size !== request.definitionVersionIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["definitionVersionIds"],
+        message: "Definition version ids must be unique",
+      });
+    }
+  });
+export type PilotPortfolioSurveillanceStartRequest = z.infer<
+  typeof PilotPortfolioSurveillanceStartRequestSchema
+>;
+
+export const PilotEmptyMutationSchema = z.object({}).strict();
+
+export const PILOT_JOB_STATUSES = [
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+] as const;
+export type PilotJobStatus = (typeof PILOT_JOB_STATUSES)[number];
+
+export interface PilotStartedJob {
+  readonly jobHandle: string;
+  readonly status: PilotJobStatus;
+  readonly operation: "portfolio_surveillance_v1";
+}
+
+export interface PilotJobStatusView {
+  readonly operation: "portfolio_surveillance_v1";
+  readonly status: PilotJobStatus;
+  readonly durableStatus: string;
+  readonly attemptCount: number;
+  readonly maxAttempts: number;
+  readonly cancellationRequested: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly errorCode: string | null;
+  readonly resultAvailable: boolean;
+}
+
+export const PilotStartedJobSchema: z.ZodType<PilotStartedJob> = z
+  .object({
+    jobHandle: PilotJobHandleSchema,
+    status: z.enum(PILOT_JOB_STATUSES),
+    operation: z.literal("portfolio_surveillance_v1"),
+  })
+  .strict();
+
+export const PilotJobStatusViewSchema: z.ZodType<PilotJobStatusView> = z
+  .object({
+    operation: z.literal("portfolio_surveillance_v1"),
+    status: z.enum(PILOT_JOB_STATUSES),
+    durableStatus: z.enum([
+      "submitted",
+      "result_artifact_persisted",
+      "manifest_artifact_persisted",
+      "completion_prepared",
+      "completed",
+      "cancelled",
+      "failed",
+    ]),
+    attemptCount: z.number().int().nonnegative(),
+    maxAttempts: z.number().int().positive(),
+    cancellationRequested: z.boolean(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+    errorCode: z.string().min(1).max(256).nullable(),
+    resultAvailable: z.boolean(),
+  })
+  .strict();
+
+export interface PilotJobResultView {
+  readonly operation: "portfolio_surveillance_v1";
+  readonly manifestId: string;
+  readonly artifactId: string;
+  readonly resultHash: string;
+  readonly result: unknown;
+}
+
+export const PilotJobResultViewSchema: z.ZodType<PilotJobResultView> = z
+  .object({
+    operation: z.literal("portfolio_surveillance_v1"),
+    manifestId: PilotPortableIdentifierSchema,
+    artifactId: PilotPortableIdentifierSchema,
+    resultHash: z.string().regex(/^(?:sha256:)?[a-f0-9]{64}$/u),
+    result: z.unknown(),
+  })
+  .strict();
+
+export interface PilotCapabilityResponse {
+  readonly enabled: true;
+  readonly scope: PilotJobScope;
+  readonly operations: readonly ["portfolio_surveillance_v1"];
+}
+
+export interface PilotStartJobResponse {
+  readonly scope: PilotJobScope;
+  readonly job: PilotStartedJob;
+}
+
+export interface PilotJobStatusResponse {
+  readonly scope: PilotJobScope;
+  readonly job: PilotJobStatusView;
+}
+
+export interface PilotJobResultResponse {
+  readonly scope: PilotJobScope;
+  readonly result: PilotJobResultView;
+}
+
 export interface SourceContractPreview {
   readonly previewId: string;
   readonly sourceContract: SourceContractDraft;
-  readonly fixture: true;
+  readonly fixture: boolean;
   readonly profile: readonly {
     readonly field: string;
     readonly inferredType: string;
@@ -337,7 +491,7 @@ export interface SessionView {
 export interface BackendMetadata {
   readonly product: "ABL Portfolio Risk Console";
   readonly backendMode: "fixture" | "oidc";
-  readonly dataMode: "fixture";
+  readonly dataMode: "fixture" | "environment";
   readonly warning: string;
 }
 
@@ -356,7 +510,7 @@ export interface WorkbenchSectionPayload {
   readonly section: SectionId;
   readonly title: string;
   readonly description: string;
-  readonly sourceMode: "fixture";
+  readonly sourceMode: "fixture" | "environment";
   readonly asOf: string;
   readonly summary: readonly {
     readonly label: string;
@@ -366,6 +520,54 @@ export interface WorkbenchSectionPayload {
   readonly columns: readonly WorkbenchColumn[];
   readonly rows: readonly WorkbenchRecord[];
 }
+
+export const SourceContractPreviewSchema: z.ZodType<SourceContractPreview> = z
+  .object({
+    previewId: z.string().min(1).max(160),
+    sourceContract: SourceContractDraftSchema,
+    fixture: z.boolean(),
+    profile: z.array(z.object({
+      field: z.string().min(1).max(160),
+      inferredType: z.string().min(1).max(160),
+      nullShare: z.string().min(1).max(80),
+      distinctCount: z.string().min(1).max(80),
+      driftState: z.enum(["stable", "new", "attention"]),
+    }).strict()).max(2_000),
+    findings: z.array(z.object({
+      severity: z.enum(["info", "warning"]),
+      message: z.string().min(1).max(2_000),
+    }).strict()).max(2_000),
+    nextStep: z.literal("propose_activation"),
+  })
+  .strict();
+
+export const WorkbenchSectionPayloadSchema: z.ZodType<WorkbenchSectionPayload> = z
+  .object({
+    section: SectionIdSchema,
+    title: z.string().min(1).max(160),
+    description: z.string().min(1).max(2_000),
+    sourceMode: z.enum(["fixture", "environment"]),
+    asOf: z.string().datetime(),
+    summary: z.array(z.object({
+      label: z.string().min(1).max(160),
+      value: z.string().max(2_000),
+      tone: z.enum(["neutral", "positive", "warning"]),
+    }).strict()).max(256),
+    columns: z.array(z.object({
+      key: z.string().min(1).max(160),
+      label: z.string().min(1).max(160),
+    }).strict()).max(256),
+    rows: z.array(z.object({
+      id: z.string().min(1).max(256),
+      status: z.enum(["healthy", "attention", "blocked", "pending", "approved"]),
+      values: z.record(z.string().min(1).max(160), z.string().max(2_000)),
+    }).strict()).max(10_000),
+  })
+  .strict();
+
+export const BrowserSafePayloadSchema = z.unknown().superRefine((value, context) => {
+  rejectForbiddenSecretMaterial(value, context, []);
+});
 
 export interface ApprovalRecord {
   readonly id: string;

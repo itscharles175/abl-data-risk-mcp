@@ -6,6 +6,7 @@ import { afterEach, test } from "node:test";
 
 import {
   canonicalHash,
+  createFxRateDefinitionV1,
   createMappingSpecV2,
   createSourceContractV1,
   type CanonicalJsonValue
@@ -19,6 +20,7 @@ import { validateBorrowingBasePolicyV2 } from "../src/domain/abl-v2/engine.js";
 import {
   GovernedDefinitionV2Resolver,
   GovernedDefinitionV2ResolverError,
+  sameGovernedDefinitionExecutionReferenceV2,
   type GovernedDefinitionV2AuthorityPort
 } from "../src/services/governed-definition-v2-resolver.js";
 
@@ -26,6 +28,35 @@ const directories: string[] = [];
 
 afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+
+test("execution-reference equality compares exactly the seven attested base fields", () => {
+  const reference = {
+    definitionVersionId: "source-v1",
+    definitionKey: "loan-tape",
+    kind: "source_contract" as const,
+    semanticVersion: "1.0.0",
+    versionHash: canonicalHash("source-version"),
+    documentHash: canonicalHash("source-document"),
+    approvalEventHash: canonicalHash("source-approval")
+  };
+  const extended = {
+    ...reference,
+    sourceContract: {
+      sourceContractId: "loan-source-a",
+      revision: 1,
+      sourceContractHash: canonicalHash("source-contract")
+    }
+  };
+
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, extended), true);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, definitionVersionId: "source-v2" }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, definitionKey: "other-source" }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, kind: "mapping_spec" }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, semanticVersion: "2.0.0" }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, versionHash: canonicalHash("other-version") }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, documentHash: canonicalHash("other-document") }), false);
+  assert.equal(sameGovernedDefinitionExecutionReferenceV2(reference, { ...reference, approvalEventHash: canonicalHash("other-approval") }), false);
 });
 
 test("resolver derives engine approval only from the durable lifecycle", () => {
@@ -242,6 +273,68 @@ test("source-contract and mapping projections replace forged identity and recomp
   assert.equal(mappingDocument.approvedBy, "real-checker");
   assertCanonicalInnerHash(mappingDocument, "mappingSpecHash");
   assert.notEqual(mappingDocument.mappingSpecHash, mapping.mappingSpecHash);
+  store.close();
+});
+
+test("FX definitions derive active execution and activation lineage exclusively from lifecycle events", () => {
+  const store = fixture();
+  const resolver = new GovernedDefinitionV2Resolver(store);
+  const sourceHash = canonicalHash({ source: "fx-rate-feed" });
+  const source = createFxRateDefinitionV1({
+    contractVersion: 1,
+    tenantId: "tenant-a",
+    fxDefinitionId: "usd-cad-closing",
+    version: "1.0.0",
+    status: "proposed",
+    sourceContract: {
+      sourceContractId: "fx-rates-source",
+      revision: 1,
+      sourceContractHash: sourceHash
+    },
+    provider: "central-bank",
+    pair: { baseCurrency: "USD", quoteCurrency: "CAD" },
+    rateType: "closing",
+    sourceConvention: "base_to_quote",
+    ratePrecision: 6,
+    baseAmountPrecision: 2,
+    quoteAmountPrecision: 2,
+    effectiveFrom: "2026-01-01",
+    createdBy: "forged-maker",
+    createdAt: "2099-01-01T00:00:00.000Z"
+  });
+  const active = activate(
+    store,
+    store.propose({
+      tenantId: "tenant-a",
+      definitionVersionId: "fx-usd-cad-v1",
+      definitionKey: "usd-cad-closing",
+      kind: "fx_rate_definition",
+      semanticVersion: "1.0.0",
+      effectiveFrom: "2026-01-01",
+      document: source,
+      proposedBy: "real-maker",
+      idempotencyKey: "fx-propose"
+    }),
+    "real-checker",
+    "fx"
+  );
+  const resolved = resolver.resolveEffective({
+    tenantId: "tenant-a",
+    kind: "fx_rate_definition",
+    definitionKey: "usd-cad-closing",
+    asOfDate: "2026-08-12"
+  });
+  const execution = resolved.executionDocument as Record<string, unknown>;
+  const activation = execution.activation as Record<string, unknown>;
+  assert.equal(execution.status, "active");
+  assert.equal(execution.createdBy, "real-maker");
+  assert.equal(execution.createdAt, active.version.proposedAt);
+  assert.equal(execution.approvedBy, "real-checker");
+  assert.equal(activation.definitionVersionId, "fx-usd-cad-v1");
+  assert.equal(activation.definitionVersionHash, active.version.versionHash);
+  assert.equal(activation.activatedBy, "real-checker");
+  assertCanonicalInnerHash(execution, "definitionHash");
+  assert.equal(JSON.stringify(execution).includes("forged-maker"), false);
   store.close();
 });
 

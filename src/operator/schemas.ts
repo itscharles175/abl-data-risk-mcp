@@ -3,7 +3,8 @@ import * as z from "zod/v4";
 import {
   GovernedDefinitionKindV2Schema,
   GovernedDefinitionTransitionV2Schema,
-  SemanticVersionV2Schema
+  SemanticVersionV2Schema,
+  Sha256HashSchema
 } from "../contracts/index.js";
 import type { JsonValue } from "../control/store.js";
 
@@ -83,6 +84,17 @@ export const sqlExtractInputSchema = z
     asOfDate: isoDateSchema,
     idempotencyKey: operatorIdentifierSchema,
     expectedCanonicalContentHash: z.string().regex(SHA256).optional()
+  })
+  .strict();
+
+/**
+ * Trusted modern capture accepts identity references only. Source location,
+ * SQL, credentials, limits, hashes and actor identity are runtime authority.
+ */
+export const extractSqlV2InputSchema = z
+  .object({
+    sourceContractId: operatorIdentifierSchema,
+    deliveryId: operatorIdentifierSchema
   })
   .strict();
 
@@ -241,6 +253,137 @@ export const certifySnapshotInputSchema = z
     idempotencyKey: operatorIdentifierSchema
   })
   .strict();
+
+/**
+ * Trusted modern certification reloads every definition and evidence payload
+ * by immutable identifier; callers cannot submit rows, totals or actor data.
+ */
+export const certifySnapshotV2InputSchema = z
+  .object({
+    snapshotId: operatorIdentifierSchema
+  })
+  .strict();
+
+export const sourceDeliveryRegisterInputSchema = z
+  .object({
+    deliveryId: operatorIdentifierSchema,
+    sourceContractDefinitionVersionId: operatorIdentifierSchema,
+    datasetScopeBindingDefinitionVersionId: operatorIdentifierSchema,
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+export const sourceDeliveryDisableInputSchema = z
+  .object({
+    deliveryId: operatorIdentifierSchema,
+    reasonCode: operatorIdentifierSchema,
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+export const sourceDeliveryGetInputSchema = z
+  .object({ deliveryId: operatorIdentifierSchema })
+  .strict();
+
+export const sourceDeliveryAuditListInputSchema = z
+  .object({
+    afterSequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+    limit: z.number().int().min(1).max(1_000).optional()
+  })
+  .strict();
+
+const historicalBundleBaseShape = {
+  bundleId: operatorIdentifierSchema,
+  version: operatorIdentifierSchema,
+  mediaType: z.literal("application/json"),
+  createdAt: isoDateTimeSchema,
+  filePath: z.string().min(1).max(4_096),
+  idempotencyKey: operatorIdentifierSchema
+} as const;
+
+export const historicalBundleRegisterInputSchema = z.discriminatedUnion("bundleKind", [
+  z
+    .object({
+      ...historicalBundleBaseShape,
+      bundleKind: z.literal("dictionary"),
+      dictionaryVersion: operatorIdentifierSchema,
+      dictionaryHash: Sha256HashSchema,
+      fieldPolicyVersion: operatorIdentifierSchema,
+      fieldPolicyHash: Sha256HashSchema
+    })
+    .strict(),
+  z
+    .object({
+      ...historicalBundleBaseShape,
+      bundleKind: z.enum(["field_policy", "mapping_compiler", "methodology"])
+    })
+    .strict()
+]);
+
+export const historicalRuntimeRegisterInputSchema = z
+  .object({
+    runtimeBundleId: operatorIdentifierSchema,
+    runtimeVersion: operatorIdentifierSchema,
+    dictionary: z
+      .object({
+        bundleId: operatorIdentifierSchema,
+        version: operatorIdentifierSchema
+      })
+      .strict(),
+    mappingCompiler: z
+      .object({
+        bundleId: operatorIdentifierSchema,
+        version: operatorIdentifierSchema
+      })
+      .strict(),
+    methodologies: z
+      .array(
+        z
+          .object({
+            bundleId: operatorIdentifierSchema,
+            version: operatorIdentifierSchema
+          })
+          .strict()
+      )
+      .max(128),
+    assembledAt: isoDateTimeSchema,
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+export const historicalRuntimeActivateInputSchema = z
+  .object({
+    runtimeBundleId: operatorIdentifierSchema,
+    runtimeBundleHash: Sha256HashSchema,
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+export const historicalRuntimeAuditListInputSchema = sourceDeliveryAuditListInputSchema;
+
+export const publishSnapshotV2InputSchema = z
+  .object({
+    linkId: operatorIdentifierSchema,
+    certificationManifestId: operatorIdentifierSchema,
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+export const disablePublicationV2InputSchema = z
+  .object({
+    linkId: operatorIdentifierSchema,
+    expectedLinkHash: Sha256HashSchema,
+    reasonCode: operatorIdentifierSchema,
+    reason: boundedTextSchema.max(1_024),
+    idempotencyKey: operatorIdentifierSchema
+  })
+  .strict();
+
+export const publicationV2GetInputSchema = z
+  .object({ linkId: operatorIdentifierSchema })
+  .strict();
+
+export const publicationV2AuditListInputSchema = sourceDeliveryAuditListInputSchema;
 
 export const putInputArtifactInputSchema = z
   .object({
@@ -593,6 +736,7 @@ const monitoringInputSchema = z
 
 export type FileIngestInput = z.infer<typeof fileIngestInputSchema>;
 export type SqlExtractInput = z.infer<typeof sqlExtractInputSchema>;
+export type ExtractSqlV2Input = z.infer<typeof extractSqlV2InputSchema>;
 export type MappingProposeInput = z.infer<typeof mappingProposeInputSchema>;
 export type MappingTransitionInput = z.infer<typeof mappingTransitionInputSchema>;
 export type DefinitionProposeInput = z.infer<typeof definitionProposeInputSchema>;
@@ -608,6 +752,19 @@ export type GovernedDefinitionV2AuditListInput = z.infer<
   typeof governedDefinitionV2AuditListInputSchema
 >;
 export type CertifySnapshotInput = z.infer<typeof certifySnapshotInputSchema>;
+export type CertifySnapshotV2Input = z.infer<typeof certifySnapshotV2InputSchema>;
+export type SourceDeliveryRegisterInput = z.infer<typeof sourceDeliveryRegisterInputSchema>;
+export type SourceDeliveryDisableInput = z.infer<typeof sourceDeliveryDisableInputSchema>;
+export type SourceDeliveryGetInput = z.infer<typeof sourceDeliveryGetInputSchema>;
+export type SourceDeliveryAuditListInput = z.infer<typeof sourceDeliveryAuditListInputSchema>;
+export type HistoricalBundleRegisterInput = z.infer<typeof historicalBundleRegisterInputSchema>;
+export type HistoricalRuntimeRegisterInput = z.infer<typeof historicalRuntimeRegisterInputSchema>;
+export type HistoricalRuntimeActivateInput = z.infer<typeof historicalRuntimeActivateInputSchema>;
+export type HistoricalRuntimeAuditListInput = z.infer<typeof historicalRuntimeAuditListInputSchema>;
+export type PublishSnapshotV2Input = z.infer<typeof publishSnapshotV2InputSchema>;
+export type DisablePublicationV2Input = z.infer<typeof disablePublicationV2InputSchema>;
+export type PublicationV2GetInput = z.infer<typeof publicationV2GetInputSchema>;
+export type PublicationV2AuditListInput = z.infer<typeof publicationV2AuditListInputSchema>;
 export type PutInputArtifactInput = z.infer<typeof putInputArtifactInputSchema>;
 export type InputCertificationProposeRequest = z.infer<typeof inputCertificationProposeSchema>;
 export type InputCertificationCertifyRequest = z.infer<typeof inputCertificationCertifySchema>;

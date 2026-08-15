@@ -28,7 +28,7 @@ await runVerificationSuite({
     commandGate(
       "release.gitnexus-current",
       "Require a current GitNexus index for the release commit",
-      ["node", ".gitnexus/run.cjs", "status"]
+      ["node", "scripts/verify-gitnexus-current.mjs"]
     ),
     commandGate(
       "release.locked-install",

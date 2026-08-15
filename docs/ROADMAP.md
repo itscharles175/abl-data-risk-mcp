@@ -23,7 +23,7 @@ The greenfield platform foundation is implemented and covered by the repository 
 | AR borrowing base | Implemented: eligibility, cross-aging, concentration, advance rate, sublimit, reserves, commitment, usage and availability | Credit-agreement rule pack and parallel BBC reconciliation |
 | Monitoring | Implemented: typed thresholds, certification gate, durable deduplicated cases and transitions | External schedule, owners/SLAs, approved notification delivery |
 | Durable execution | Implemented: signed replay-protected plans, principal-bound handles, durable queue/leases/reaping/results/audit | Load/failure testing in target infrastructure; shared-store design for scale |
-| Deployment | Implemented: Dockerfile, Compose, Kubernetes base, operator-run security/release checks, operations/release docs; current working-tree image passed local runtime, SBOM, vulnerability, secret, IaC, and schema gates | Immutable post-commit target-architecture build, registry/signing/provenance, live cloud deployment and restore |
+| Deployment | Implemented: Dockerfile, Compose, Kubernetes base, operator-run security/release checks, operations/release docs | Exact-commit runtime/SBOM/vulnerability/secret/IaC/schema evidence, immutable target-architecture build, registry/signing/provenance, live cloud deployment and restore |
 
 There remains no arbitrary SQL, raw-row MCP tool, source-system write, calendar scheduler, notification dispatcher, or autonomous credit decision.
 
@@ -157,7 +157,7 @@ Do not collapse progress into one opaque score. Track:
 | Production source | PostgreSQL only if the selected client environment supports real certification | Before production claim |
 | Deployment model | Client VPC or tightly controlled hybrid is the conservative first posture | Before IdP/TLS/storage design |
 | Detail access | Aggregate-only remains the MCP default | Before threat-model approval |
-| Currency | Single-currency pilot unless an approved replayable FX definition exists | Before certification |
+| Currency | FX contracts are implemented, but execution remains single-currency until a durable maker/checker FX authority, certified rate repository, effective selector, and conversion replay are composed | Before certification |
 | Notification channel | Choose only after recipient ownership, minimization, retention, and delivery audit are approved | Before recurring monitoring |
 
 ## Definition of success

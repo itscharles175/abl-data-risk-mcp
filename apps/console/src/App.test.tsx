@@ -32,7 +32,7 @@ describe("App", () => {
   it("renders an authenticated, role-filtered portfolio workspace", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/v1/meta")) return response({ product: "ABL Portfolio Risk Console", backendMode: "fixture", dataMode: "fixture", warning: "Fixture" });
+      if (url.endsWith("/api/v1/meta")) return response({ product: "ABL Portfolio Risk Console", backendMode: "oidc", dataMode: "fixture", warning: "Fixture" });
       if (url.endsWith("/api/v1/session")) return response(session);
       if (url.endsWith("/api/v1/navigation")) return response({ items: [
         { id: "overview", label: "Overview", group: "Monitor", permission: "portfolio:read" },

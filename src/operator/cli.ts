@@ -8,6 +8,7 @@ import { OperatorInputError } from "./schemas.js";
 export const OPERATOR_COMMANDS = [
   "ingest-file",
   "extract-sql",
+  "extract-sql-v2",
   "mapping-propose",
   "mapping-transition",
   "definition-propose",
@@ -19,6 +20,19 @@ export const OPERATOR_COMMANDS = [
   "definition-v2-select-effective",
   "definition-v2-audit-list",
   "certify-snapshot",
+  "certify-snapshot-v2",
+  "source-delivery-register",
+  "source-delivery-disable",
+  "source-delivery-get",
+  "source-delivery-audit-list",
+  "historical-bundle-register",
+  "historical-runtime-register",
+  "historical-runtime-activate",
+  "historical-runtime-audit-list",
+  "publish-snapshot-v2",
+  "disable-publication-v2",
+  "publication-v2-get",
+  "publication-v2-audit-list",
   "put-input-artifact",
   "input-certification-propose",
   "input-certification-certify",
@@ -36,7 +50,21 @@ type OperatorControlPlanePort = Pick<
   OperatorControlPlane,
   | "approveMembership"
   | "certifySnapshot"
+  | "certifySnapshotV2"
+  | "registerSourceDelivery"
+  | "disableSourceDelivery"
+  | "getSourceDelivery"
+  | "listSourceDeliveryAudit"
+  | "registerHistoricalBundle"
+  | "registerHistoricalRuntime"
+  | "activateHistoricalRuntime"
+  | "listHistoricalRuntimeAudit"
+  | "publishSnapshotV2"
+  | "disablePublicationV2"
+  | "getPublicationV2"
+  | "listPublicationV2Audit"
   | "extractSqlSnapshot"
+  | "extractSqlSnapshotV2"
   | "getGovernedDefinitionV2"
   | "ingestLoanTape"
   | "listAlerts"
@@ -144,6 +172,8 @@ async function executeCommand(
       return controlPlane.ingestLoanTape(request);
     case "extract-sql":
       return controlPlane.extractSqlSnapshot(request, signal === undefined ? {} : { signal });
+    case "extract-sql-v2":
+      return controlPlane.extractSqlSnapshotV2(request, signal === undefined ? {} : { signal });
     case "mapping-propose":
       return controlPlane.proposeMapping(request);
     case "mapping-transition":
@@ -166,6 +196,32 @@ async function executeCommand(
       return controlPlane.listGovernedDefinitionV2Audit(request);
     case "certify-snapshot":
       return controlPlane.certifySnapshot(request);
+    case "certify-snapshot-v2":
+      return controlPlane.certifySnapshotV2(request);
+    case "source-delivery-register":
+      return controlPlane.registerSourceDelivery(request);
+    case "source-delivery-disable":
+      return controlPlane.disableSourceDelivery(request);
+    case "source-delivery-get":
+      return controlPlane.getSourceDelivery(request);
+    case "source-delivery-audit-list":
+      return controlPlane.listSourceDeliveryAudit(request);
+    case "historical-bundle-register":
+      return controlPlane.registerHistoricalBundle(request);
+    case "historical-runtime-register":
+      return controlPlane.registerHistoricalRuntime(request);
+    case "historical-runtime-activate":
+      return controlPlane.activateHistoricalRuntime(request);
+    case "historical-runtime-audit-list":
+      return controlPlane.listHistoricalRuntimeAudit(request);
+    case "publish-snapshot-v2":
+      return controlPlane.publishSnapshotV2(request);
+    case "disable-publication-v2":
+      return controlPlane.disablePublicationV2(request);
+    case "publication-v2-get":
+      return controlPlane.getPublicationV2(request);
+    case "publication-v2-audit-list":
+      return controlPlane.listPublicationV2Audit(request);
     case "put-input-artifact":
       return controlPlane.putInputArtifact(request);
     case "input-certification-propose":
@@ -189,19 +245,33 @@ async function executeCommand(
 
 const KNOWN_EXTERNAL_ERROR_CODES = new Set([
   "ALERT_NOT_FOUND",
+  "ALREADY_EXISTS",
   "ARTIFACT_NOT_FOUND",
   "ARTIFACT_TOO_LARGE",
+  "AUTHORITY_MISMATCH",
   "BYTE_LIMIT_EXCEEDED",
   "CANCELLED",
+  "CAPABILITY_NOT_CONFIGURED",
+  "CLOCK_ROLLBACK",
   "COLUMN_NOT_ALLOWED",
   "CONFLICT",
+  "CORRECTION_LINEAGE_INVALID",
+  "DATA_QUALITY_FAILED",
   "DEFINITION_INVALID",
   "DEFINITION_NOT_EFFECTIVE",
+  "DELIVERY_DISABLED",
+  "DELIVERY_NOT_ALLOWED",
+  "EVIDENCE_NOT_FOUND",
+  "EVIDENCE_INVALID",
+  "EXTRACTION_LIMIT_EXCEEDED",
+  "EXTRACTION_SUBSTITUTION",
   "FILE_NOT_REGULAR",
   "FILE_TOO_LARGE",
+  "FROZEN_EVIDENCE_DRIFT",
   "IDEMPOTENCY_CONFLICT",
   "ILLEGAL_TRANSITION",
   "INTEGRITY_FAILURE",
+  "INACTIVE_DEFINITION",
   "INVALID_ARGUMENT",
   "INVALID_DOCUMENT",
   "INVALID_INPUT",
@@ -212,14 +282,24 @@ const KNOWN_EXTERNAL_ERROR_CODES = new Set([
   "LIMIT_EXCEEDED",
   "MAKER_CHECKER_VIOLATION",
   "MAPPING_NOT_READY",
+  "MISSING_REQUIRED_EVIDENCE",
   "NOT_FOUND",
+  "NON_TERMINAL_SNAPSHOT",
+  "OPERATOR_REQUIRED",
   "READ_ONLY_REQUIRED",
   "RELATION_NOT_ALLOWED",
+  "RECONCILIATION_FAILED",
+  "REQUIRED_SECTION_MISSING",
+  "RESOURCE_LIMIT",
   "ROW_LIMIT_EXCEEDED",
   "SNAPSHOT_MISMATCH",
   "SNAPSHOT_NOT_FOUND",
   "SOURCE_FAILURE",
+  "SOURCE_CONTRACT_NOT_ACTIVE",
+  "SOURCE_CONTRACT_NOT_FOUND",
   "SOURCE_NOT_CONFIGURED",
+  "SCOPE_BINDING_INVALID",
+  "SCOPE_BINDING_NOT_FOUND",
   "STORE_CLOSED",
   "TIME_LIMIT_EXCEEDED",
   "UNKNOWN_KEY",
@@ -250,6 +330,7 @@ function publicMessage(code: string): string {
   if (code === "MAKER_CHECKER_VIOLATION") return "Maker/checker separation rejected the operation";
   if (code === "IDEMPOTENCY_CONFLICT") return "Idempotency key conflicts with an earlier request";
   if (code === "SOURCE_NOT_CONFIGURED") return "Trusted SQL source is not configured";
+  if (code === "CAPABILITY_NOT_CONFIGURED") return "Governed operator capability is not configured";
   if (code === "MAPPING_NOT_READY") return "Mapping did not pass deterministic validation";
   if (code === "DEFINITION_NOT_EFFECTIVE") return "Required governed definition is not effective";
   if (code === "SNAPSHOT_NOT_FOUND" || code === "NOT_FOUND" || code === "ALERT_NOT_FOUND") {

@@ -13,6 +13,8 @@ import {
   canonicalHash,
   compareSemanticVersionsV2,
   computeSemanticDiffV1,
+  createGovernedDatasetScopeBindingV1,
+  createSnapshotCertificationDefinitionV1,
   createGovernedDefinitionVersionV2,
   createMappingSpecV2,
   createMetricProjectionV1,
@@ -1003,7 +1005,7 @@ test("the shipped schema-v1 event history migrates atomically before withdrawal 
   database.close();
 });
 
-test("the exact shipped schema-v2 kind constraint migrates through v4 without rewriting evidence", () => {
+test("the exact shipped schema-v2 kind constraint migrates through v5 without rewriting evidence", () => {
   const directory = mkdtempSync(join(tmpdir(), "abl-governed-definition-v3-migration-"));
   directories.push(directory);
   const databasePath = join(directory, "control.sqlite");
@@ -1059,7 +1061,7 @@ test("the exact shipped schema-v2 kind constraint migrates through v4 without re
   database.close();
 });
 
-test("the exact shipped schema-v3 kind constraint migrates to v4 without rewriting evidence", () => {
+test("the exact shipped schema-v3 kind constraint migrates to v5 without rewriting evidence", () => {
   const directory = mkdtempSync(join(tmpdir(), "abl-governed-definition-v4-migration-"));
   directories.push(directory);
   const databasePath = join(directory, "control.sqlite");
@@ -1166,6 +1168,126 @@ test("the exact shipped schema-v3 kind constraint migrates to v4 without rewriti
     () => database.prepare("UPDATE governed_definition_v2_events SET actor = 'tamper'").run(),
     /append-only/
   );
+  database.close();
+});
+
+test("the exact shipped schema-v4 kind constraint migrates to v5 without rewriting evidence", () => {
+  const directory = mkdtempSync(join(tmpdir(), "abl-governed-definition-v5-migration-"));
+  directories.push(directory);
+  const databasePath = join(directory, "control.sqlite");
+  let clockIndex = 0;
+  const clock = () => new Date(TIMES[clockIndex++] ?? "2026-08-12T13:00:00.000Z");
+  const initial = new GovernedDefinitionV2Store(databasePath, { clock });
+  const request = proposal("metric-migrate-v4", "1.0.0", "2026-01-01", 12);
+  const proposed = initial.propose(request);
+  const validated = transition(initial, proposed, "validated", "checker-a", "migrate-v4-validate");
+  const approved = transition(initial, validated, "approved", "checker-a", "migrate-v4-approve");
+  initial.close();
+
+  downgradeGovernedDefinitionVersionsToShippedV4(databasePath);
+  const sequenceDatabase = new DatabaseSync(databasePath);
+  const sequenceUpdate = sequenceDatabase
+    .prepare("UPDATE sqlite_sequence SET seq = 110 WHERE name = 'governed_definition_v2_events'")
+    .run();
+  assert.equal(sequenceUpdate.changes, 1);
+  sequenceDatabase.close();
+
+  const migrated = new GovernedDefinitionV2Store(databasePath, { clock });
+  assert.equal(
+    migrated.get("tenant-a", approved.version.definitionVersionId)?.version.versionHash,
+    approved.version.versionHash
+  );
+  const withdrawn = migrated.transition({
+    tenantId: "tenant-a",
+    definitionVersionId: approved.version.definitionVersionId,
+    toStatus: "withdrawn",
+    expectedRevision: approved.lifecycleRevision,
+    actor: "checker-b",
+    evidence: { reason: "v4 migration high-water check" },
+    idempotencyKey: "migrate-v4-withdraw"
+  });
+  assert.equal(withdrawn.status, "withdrawn");
+  assert.equal(migrated.listAuditEvents("tenant-a").at(-1)?.sequence, 111);
+  migrated.close();
+
+  const database = new DatabaseSync(databasePath);
+  const versionsSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'governed_definition_v2_versions'").get() as { sql: string }).sql;
+  assert.match(versionsSql, /'fx_rate_definition'/);
+  assert.equal(
+    (database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'governed_definition_v2_events'").get() as { seq: number }).seq,
+    111
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("the exact shipped schema-v5 kind constraint migrates to v6 and governs snapshot certification controls", () => {
+  const directory = mkdtempSync(join(tmpdir(), "abl-governed-definition-v6-migration-"));
+  directories.push(directory);
+  const databasePath = join(directory, "control.sqlite");
+  let clockIndex = 0;
+  const clock = () => new Date(TIMES[clockIndex++] ?? "2026-08-12T13:00:00.000Z");
+  const initial = new GovernedDefinitionV2Store(databasePath, { clock });
+  const existing = initial.propose(proposal("metric-migrate-v5", "1.0.0", "2026-01-01", 12));
+  const approved = transition(
+    initial,
+    transition(initial, existing, "validated", "checker-a", "migrate-v5-validate"),
+    "approved",
+    "checker-a",
+    "migrate-v5-approve"
+  );
+  const beforeEvents = initial.listAuditEvents("tenant-a");
+  initial.close();
+
+  downgradeGovernedDefinitionVersionsToShippedV5(databasePath);
+  const sequenceDatabase = new DatabaseSync(databasePath);
+  const sequenceUpdate = sequenceDatabase
+    .prepare("UPDATE sqlite_sequence SET seq = 130 WHERE name = 'governed_definition_v2_events'")
+    .run();
+  assert.equal(sequenceUpdate.changes, 1);
+  const shippedRows = governedDefinitionStorageRows(sequenceDatabase);
+  sequenceDatabase.close();
+
+  const migrated = new GovernedDefinitionV2Store(databasePath, { clock });
+  assert.deepEqual(migrated.listAuditEvents("tenant-a"), beforeEvents);
+  const migratedStorage = new DatabaseSync(databasePath);
+  assert.deepEqual(governedDefinitionStorageRows(migratedStorage), shippedRows);
+  migratedStorage.close();
+  const control = migrated.propose({
+    tenantId: "tenant-a",
+    definitionVersionId: "snapshot-certification-control-v1",
+    definitionKey: "facility-a-binding",
+    kind: "snapshot_certification_control",
+    semanticVersion: "1.0.0",
+    effectiveFrom: "2026-01-01",
+    document: snapshotCertificationControlDefinition(),
+    proposedBy: "maker-a",
+    idempotencyKey: "snapshot-certification-control-propose"
+  });
+  const active = activate(migrated, control, "checker-a", "snapshot-certification-control");
+  const resolved = new GovernedDefinitionV2Resolver(migrated).resolveEffective({
+    tenantId: "tenant-a",
+    kind: "snapshot_certification_control",
+    definitionKey: "facility-a-binding",
+    asOfDate: "2026-01-15"
+  });
+  assert.equal(resolved.reference.definitionVersionId, active.version.definitionVersionId);
+  assert.equal(
+    (resolved.executionDocument as { definitionKind: string }).definitionKind,
+    "snapshot_certification_control"
+  );
+  assert.equal(resolved.approvalEvidence.approvalEventHash, active.approvalEvidence?.approvalEventHash);
+  assert.equal(migrated.listAuditEvents("tenant-a").at(-1)?.sequence, 134);
+  migrated.close();
+
+  const database = new DatabaseSync(databasePath);
+  const versionsSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'governed_definition_v2_versions'").get() as { sql: string }).sql;
+  assert.match(versionsSql, /'snapshot_certification_control'/);
+  assert.equal(
+    (database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'governed_definition_v2_events'").get() as { seq: number }).seq,
+    134
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });
 
@@ -1303,8 +1425,17 @@ function downgradeGovernedDefinitionEventsToShippedV1(databasePath: string): voi
 function downgradeGovernedDefinitionVersionsToShippedV2(databasePath: string): void {
   downgradeGovernedDefinitionVersions(
     databasePath,
-    ",'source_access_policy','dataset_scope_binding'",
-    ["source_access_policy", "dataset_scope_binding"],
+    [
+      ",'source_access_policy','dataset_scope_binding'",
+      ",'fx_rate_definition'",
+      ",'snapshot_certification_control'"
+    ],
+    [
+      "source_access_policy",
+      "dataset_scope_binding",
+      "fx_rate_definition",
+      "snapshot_certification_control"
+    ],
     2
   );
 }
@@ -1312,17 +1443,35 @@ function downgradeGovernedDefinitionVersionsToShippedV2(databasePath: string): v
 function downgradeGovernedDefinitionVersionsToShippedV3(databasePath: string): void {
   downgradeGovernedDefinitionVersions(
     databasePath,
-    ",'dataset_scope_binding'",
-    ["dataset_scope_binding"],
+    [",'dataset_scope_binding'", ",'fx_rate_definition'", ",'snapshot_certification_control'"],
+    ["dataset_scope_binding", "fx_rate_definition", "snapshot_certification_control"],
     3
+  );
+}
+
+function downgradeGovernedDefinitionVersionsToShippedV4(databasePath: string): void {
+  downgradeGovernedDefinitionVersions(
+    databasePath,
+    [",'fx_rate_definition'", ",'snapshot_certification_control'"],
+    ["fx_rate_definition", "snapshot_certification_control"],
+    4
+  );
+}
+
+function downgradeGovernedDefinitionVersionsToShippedV5(databasePath: string): void {
+  downgradeGovernedDefinitionVersions(
+    databasePath,
+    [",'snapshot_certification_control'"],
+    ["snapshot_certification_control"],
+    5
   );
 }
 
 function downgradeGovernedDefinitionVersions(
   databasePath: string,
-  removedKindSql: string,
+  removedKindSql: readonly string[],
   absentKinds: readonly string[],
-  schemaVersion: 2 | 3
+  schemaVersion: 2 | 3 | 4 | 5
 ): void {
   const database = new DatabaseSync(databasePath);
   const sql = (type: "table" | "index" | "trigger", name: string): string => {
@@ -1333,8 +1482,11 @@ function downgradeGovernedDefinitionVersions(
     return row.sql;
   };
   const currentVersionTableSql = sql("table", "governed_definition_v2_versions");
-  assert.equal(currentVersionTableSql.includes(removedKindSql), true);
-  const versionTableSql = currentVersionTableSql.replace(removedKindSql, "");
+  for (const removed of removedKindSql) assert.equal(currentVersionTableSql.includes(removed), true);
+  const versionTableSql = removedKindSql.reduce(
+    (sql, removed) => sql.replace(removed, ""),
+    currentVersionTableSql
+  );
   for (const kind of absentKinds) assert.equal(versionTableSql.includes(kind), false);
   const eventTableSql = sql("table", "governed_definition_v2_events");
   const idempotencyTableSql = sql("table", "governed_definition_v2_idempotency");
@@ -1421,6 +1573,162 @@ function governedDefinitionStorageRows(database: DatabaseSync): Readonly<{
       )
       .all()
   };
+}
+
+function snapshotCertificationControlDefinition() {
+  const sourceContract = {
+    sourceContractId: "loan-source",
+    revision: 1,
+    sourceContractHash: canonicalHash({ source: "loan-source", revision: 1 })
+  };
+  return createSnapshotCertificationDefinitionV1({
+    contractVersion: 1,
+    definitionKind: "snapshot_certification_control",
+    tenantId: "tenant-a",
+    certificationDefinitionId: "facility-a-binding",
+    revision: 1,
+    sourceContract,
+    sourceContractExecution: {
+      definitionVersionId: "source-definition-a",
+      definitionKey: "loan-tape-source",
+      kind: "source_contract",
+      semanticVersion: "1.0.0",
+      versionHash: canonicalHash("source-version"),
+      documentHash: canonicalHash("source-document"),
+      approvalEventHash: canonicalHash("source-approval"),
+      sourceContract
+    },
+    scopeBinding: createGovernedDatasetScopeBindingV1({
+      contractVersion: 1,
+      tenantId: "tenant-a",
+      bindingId: "facility-a-binding",
+      revision: 1,
+      datasetId: "loan-dataset",
+      sourceContract,
+      scope: { scopeType: "facility", scopeId: "facility-a" },
+      effectiveFrom: "2026-01-01"
+    }),
+    scopeBindingExecution: {
+      definitionVersionId: "scope-definition-a",
+      definitionKey: "facility-a-binding",
+      kind: "dataset_scope_binding",
+      semanticVersion: "1.0.0",
+      versionHash: canonicalHash("scope-version"),
+      documentHash: canonicalHash("scope-document"),
+      approvalEventHash: canonicalHash("scope-approval"),
+      bindingId: "facility-a-binding",
+      revision: 1,
+      bindingHash: canonicalHash({
+        contractVersion: 1,
+        tenantId: "tenant-a",
+        bindingId: "facility-a-binding",
+        revision: 1,
+        datasetId: "loan-dataset",
+        sourceContract,
+        scope: { scopeType: "facility", scopeId: "facility-a" },
+        effectiveFrom: "2026-01-01"
+      }),
+      sourceContract
+    },
+    mappingExecution: {
+      definitionVersionId: "mapping-definition-a",
+      definitionKey: "loan-tape",
+      kind: "mapping_spec",
+      semanticVersion: "1.0.0",
+      versionHash: canonicalHash("mapping-version"),
+      documentHash: canonicalHash("mapping-document"),
+      approvalEventHash: canonicalHash("mapping-approval"),
+      mappingSpecId: "mapping-spec-a",
+      mappingSpecRevision: 1,
+      mappingSpecHash: canonicalHash("mapping-spec"),
+      sourceContract,
+      activation: {
+        status: "active",
+        lifecycleRevision: 3,
+        activatedBy: "mapping-checker",
+        activatedAt: "2026-01-02T00:00:00.000Z",
+        activationEventHash: canonicalHash("mapping-activation")
+      },
+      window: { effectiveFrom: "2026-01-01" }
+    },
+    runtime: {
+      runtimeBundleId: "runtime-a",
+      runtimeVersion: "1.0.0",
+      runtimeBundleHash: canonicalHash("runtime"),
+      dictionary: {
+        contractVersion: 1,
+        bundleKind: "dictionary",
+        bundleId: "dictionary-a",
+        version: "1.0.0",
+        contentHash: canonicalHash("dictionary-content"),
+        artifactId: "dictionary-artifact",
+        mediaType: "application/json",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        dictionaryVersion: "1.0.0",
+        dictionaryHash: canonicalHash("dictionary"),
+        fieldPolicyVersion: "1.0.0",
+        fieldPolicyHash: canonicalHash("field-policy")
+      },
+      mappingCompiler: {
+        contractVersion: 1,
+        bundleKind: "mapping_compiler",
+        bundleId: "compiler-a",
+        version: "1.0.0",
+        contentHash: canonicalHash("compiler-content"),
+        artifactId: "compiler-artifact",
+        mediaType: "application/json",
+        createdAt: "2026-01-01T00:00:00.000Z"
+      }
+    },
+    dataQuality: {
+      definitionId: "dq-a",
+      rulesetId: "dq-rules-a",
+      mappingSectionId: "loans",
+      requiredSectionIds: ["loans"],
+      rules: [
+        {
+          ruleId: "loan-id-required",
+          type: "required",
+          field: "loan_id",
+          severity: "critical",
+          blocking: true
+        }
+      ],
+      balanceField: "current_balance",
+      materialBalance: "0",
+      window: { effectiveFrom: "2026-01-01" }
+    },
+    certificationReconciliation: {
+      definitionId: "reconciliation-a",
+      reconciliationId: "reconciliation-a",
+      requiredSectionIds: ["loans"],
+      controls: [
+        {
+          controlId: "loan-balance",
+          sectionId: "loans",
+          recordSource: "normalized",
+          dimensions: ["portfolio_id"],
+          balanceField: "current_balance",
+          currencyField: "currency",
+          expected: [
+            {
+              dimensions: { portfolio_id: "portfolio-a" },
+              rowCount: 1,
+              balance: "100",
+              currency: "USD"
+            }
+          ],
+          balanceTolerance: "0"
+        }
+      ],
+      window: { effectiveFrom: "2026-01-01" }
+    },
+    window: { effectiveFrom: "2026-01-01" },
+    approval: {
+      status: "pending_durable_approval",
+      authority: "governed_definition_v2_lifecycle"
+    }
+  });
 }
 
 function fixture(): { store: GovernedDefinitionV2Store } {
