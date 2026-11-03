@@ -65,7 +65,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/express": "2.0.0",
-    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/node": "2.1.0",
     "@modelcontextprotocol/server": "2.0.0",
     "decimal.js": "10.6.0",
     "express": "5.2.1",
